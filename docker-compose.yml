@@ -1,0 +1,186 @@
+# =========================================================
+# 🛰️  TID Wayfarer Mesh: Core + Outpost + Shared DB
+# 🚀 Sovereign Cyber-Physical Command Fabric
+# =========================================================
+#
+# Credentials come from the environment with dev-only defaults, so a real
+# password is never baked into the published file. Override per shell, or put
+# them in a .env beside this file (gitignored):
+#
+#   POSTGRES_PASSWORD=...  JWT_SECRET=...  NODE_SHARED_SECRET=...
+#
+# The defaults are safe for a throwaway local stack and unsafe for anything
+# reachable from outside your machine.
+
+services:
+  # =======================
+  # 🗄️  Shared Postgres DB
+  # =======================
+  tidasone-db-v2:
+    image: postgres:16-alpine
+    container_name: tidasone-db-v2
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpassword}
+      POSTGRES_DB: tidasone
+
+    volumes:
+      - ../postgres-data:/var/lib/postgresql/data
+
+    ports:
+      - "5432:5432"
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d tidasone"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+    networks:
+      - tidasone-net
+
+
+  # ======================
+  # 🛰️  Core API Outpost
+  # ======================
+  tid-wayfarer-core:
+    build:
+      context: .
+      dockerfile: dockerfile
+    image: tid-wayfarer:latest
+    container_name: tid-wayfarer-core
+    restart: unless-stopped
+
+    depends_on:
+      tidasone-db-v2:
+        condition: service_healthy
+
+    # Pulls the actual DB + API config from ./.env
+    env_file:
+      - ./.env
+
+    # Overrides or ensures essential variables
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-devpassword}@tidasone-db-v2:5432/tidasone
+      POSTGRES_HOST: tidasone-db-v2
+      POSTGRES_PORT: 5432
+
+      OUTPOST_NAME: TIDasONE-Core
+      HOST: 0.0.0.0
+      PORT: 3000
+      JWT_SECRET: ${JWT_SECRET:-dev_jwt_secret_change_me}
+      NODE_SHARED_SECRET: ${NODE_SHARED_SECRET:-dev_node_shared_secret}
+      # both = accept per-node Ed25519 signatures or the shared token above
+      FABRIC_AUTH: both
+
+    ports:
+      - "4000:3000"
+
+    volumes:
+      - ./shared/static:/app/static:ro
+
+    networks:
+      - tidasone-net
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+
+  # ==========================
+  # 🛰️  Outpost B API
+  # ==========================
+  tidasone-b-api:
+    build:
+      context: ../TIDasONE-B
+      dockerfile: dockerfile
+    container_name: tidasone-b-api
+    restart: unless-stopped
+
+    depends_on:
+      tid-wayfarer-core:
+        condition: service_healthy
+
+    # 🔥 Pulls env values from ../TIDasONE-B/.env
+    env_file:
+      - ../TIDasONE-B/.env
+
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-devpassword}@tidasone-db-v2:5432/tidasone
+      POSTGRES_HOST: tidasone-db-v2
+      POSTGRES_PORT: 5432
+
+      OUTPOST_NAME: TIDasONE-Outpost-B
+      CORE_API_URL: http://tid-wayfarer-core:3000/api/nodes/register
+      API_ENDPOINT: http://tidasone-b-api:3000/api
+
+      HOST: 0.0.0.0
+      PORT: 3000
+      JWT_SECRET: ${JWT_SECRET:-dev_jwt_secret_change_me}
+      NODE_SHARED_SECRET: ${NODE_SHARED_SECRET:-dev_node_shared_secret}
+      # both = accept per-node Ed25519 signatures or the shared token above
+      FABRIC_AUTH: both
+
+    ports:
+      - "3001:3000"   # doesn't collide with core's 3000
+
+    volumes:
+      - ./shared/static:/app/static:ro
+
+    networks:
+      - tidasone-net
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+
+  # ==========================
+  # 🌐  Go mesh-relay sidecar
+  # ==========================
+  tidasone-mesh-relay:
+    build:
+      context: ./services/mesh-relay
+      dockerfile: Dockerfile
+    container_name: tidasone-mesh-relay
+    restart: unless-stopped
+
+    depends_on:
+      tidasone-db-v2:
+        condition: service_healthy
+
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-devpassword}@tidasone-db-v2:5432/tidasone
+      NODE_ID: "00000000-0000-0000-0000-000000000001"
+      OUTPOST_NAME: TIDasONE-Core-Mesh
+      LISTEN_ADDR: ":3100"
+      POLL_INTERVAL: "5s"
+      HTTP_TIMEOUT: "30s"
+      BATCH_SIZE: "50"
+
+    ports:
+      - "3100:3100"
+
+    networks:
+      - tidasone-net
+
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3100/health > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+
+# --------------------------------------
+# 🌐 Mesh Network (external)
+# --------------------------------------
+networks:
+  tidasone-net:
+    external: true
+

@@ -1,0 +1,70 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO users (id, username, email, role, nft_token_id, nft_image_url, identity_hash)\n        VALUES ($1, $2, $3, COALESCE($4, 'user'), $5, $6, $7)\n        RETURNING id, username, email, role, nft_token_id, nft_image_url, identity_hash, created_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "username",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "email",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "role",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "nft_token_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "nft_image_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "identity_hash",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamp"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "b0ca8a7ae8eef27e2debdfe3b53fe84d8fb6603dcefb3243ab72e0529a04ff27"
+}

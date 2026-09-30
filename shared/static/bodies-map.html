@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>TIDasONE · 3D Bodies Map</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!-- Cesium (3D globe / planetary engine; free without an Ion token) -->
+  <link rel="stylesheet" href="https://cesium.com/downloads/cesiumjs/releases/1.117/Build/Cesium/Widgets/widgets.css" />
+  <script src="https://cesium.com/downloads/cesiumjs/releases/1.117/Build/Cesium/Cesium.js"></script>
+
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; background: #000; color: #ddd;
+                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+    #cesium { width: 100%; height: 100vh; }
+
+    #panel {
+      position: absolute; top: 10px; left: 10px; z-index: 10;
+      background: rgba(8, 16, 28, 0.85); padding: 14px 16px; border-radius: 10px;
+      border: 1px solid #1f3a5a; min-width: 260px; backdrop-filter: blur(6px);
+    }
+    #panel h1 { font-size: 14px; margin: 0 0 10px 0; letter-spacing: 0.06em;
+                text-transform: uppercase; color: #6fb3ff; }
+    #panel label { display: block; font-size: 11px; opacity: 0.7; margin: 8px 0 2px; }
+    #panel select { width: 100%; padding: 6px 8px; background: #0c1a2c; color: #e8efff;
+                    border: 1px solid #244873; border-radius: 6px; font-size: 13px; }
+    #panel .meta { font-size: 12px; line-height: 1.5; margin-top: 12px; padding-top: 10px;
+                   border-top: 1px solid #1f3a5a; }
+    #panel .meta b { color: #6fb3ff; }
+    #panel .count { font-size: 11px; opacity: 0.7; margin-top: 6px; }
+    #panel .err { color: #ff7d6f; font-size: 12px; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <div id="cesium"></div>
+
+  <div id="panel">
+    <h1>🌌 TIDasONE — 3D bodies</h1>
+
+    <label for="bodySelect">Body</label>
+    <select id="bodySelect"></select>
+
+    <div class="meta" id="meta">loading…</div>
+    <div class="count" id="count"></div>
+    <div class="err"   id="err"></div>
+  </div>
+
+  <script>
+    // ─── Cesium viewer ────────────────────────────────────────────────────
+    // No Ion token = no premium imagery, but the OpenStreetMap basemap and
+    // the WebGL globe are free and good enough for v1.
+    const viewer = new Cesium.Viewer("cesium", {
+      baseLayerPicker: false,
+      geocoder: false,
+      homeButton: false,
+      sceneModePicker: false,
+      navigationHelpButton: false,
+      animation: false,
+      timeline: false,
+      fullscreenButton: false,
+      infoBox: true,
+      selectionIndicator: true,
+      imageryProvider: new Cesium.UrlTemplateImageryProvider({
+        url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+        credit: "© OpenStreetMap contributors",
+        maximumLevel: 19,
+      }),
+    });
+
+    // ─── API helpers ───────────────────────────────────────────────────────
+    const apiBase = window.location.origin;
+    // The API is behind the fabric guard, so this page has to carry the same
+    // token the console stores. Without it every call here came back 401.
+    async function api(path) {
+      const t = localStorage.getItem("tidw_token");
+      const r = await fetch(apiBase + path, {
+        headers: t ? { Authorization: "Bearer " + t } : {},
+      });
+      if (r.status === 401) {
+        location.replace("/static/console.html");
+        throw new Error("sign in required");
+      }
+      if (!r.ok) throw new Error(path + " → HTTP " + r.status);
+      return r.json();
+    }
+
+    const $bodySelect = document.getElementById("bodySelect");
+    const $meta       = document.getElementById("meta");
+    const $count      = document.getElementById("count");
+    const $err        = document.getElementById("err");
+
+    let allBodies = [];
+    let currentEntities = [];
+
+    function showErr(msg) { $err.textContent = msg; }
+    function clearEntities() {
+      for (const e of currentEntities) viewer.entities.remove(e);
+      currentEntities = [];
+    }
+
+    // Cesium colors per body class.
+    const classColor = {
+      planet:       Cesium.Color.fromCssColorString("#6fb3ff"),
+      moon:         Cesium.Color.fromCssColorString("#e3e3e3"),
+      dwarf_planet: Cesium.Color.fromCssColorString("#c79bff"),
+      asteroid:     Cesium.Color.fromCssColorString("#9a8166"),
+      star:         Cesium.Color.fromCssColorString("#ffd166"),
+      exoplanet:    Cesium.Color.fromCssColorString("#74e1c1"),
+    };
+
+    // Feature-type pin colors.
+    const featureColor = {
+      landing_site: Cesium.Color.LIME,
+      crater:       Cesium.Color.fromCssColorString("#f6c945"),
+      mare:         Cesium.Color.fromCssColorString("#7cb1ff"),
+      mons:         Cesium.Color.RED,
+      vallis:       Cesium.Color.fromCssColorString("#ff9a3b"),
+      planitia:     Cesium.Color.fromCssColorString("#c9c9c9"),
+      chaos:        Cesium.Color.fromCssColorString("#a974ff"),
+    };
+
+    // ─── Load bodies into selector, grouped by class ──────────────────────
+    async function loadBodies() {
+      try {
+        allBodies = await api("/api/bodies");
+      } catch (e) {
+        showErr("Failed to load /api/bodies — is the API running?");
+        return;
+      }
+      const groups = {};
+      for (const b of allBodies) (groups[b.body_class] ||= []).push(b);
+      const classOrder = ["star", "planet", "dwarf_planet", "moon", "asteroid", "exoplanet"];
+      $bodySelect.innerHTML = "";
+      for (const cls of classOrder) {
+        const arr = groups[cls];
+        if (!arr) continue;
+        const og = document.createElement("optgroup");
+        og.label = cls.replace("_", " ").toUpperCase();
+        for (const b of arr) {
+          const o = document.createElement("option");
+          o.value = b.body_id;
+          o.textContent = `${b.name} (${b.body_id})`;
+          og.appendChild(o);
+        }
+        $bodySelect.appendChild(og);
+      }
+      // Default to Earth (NAIF 399) if present.
+      if (allBodies.some(b => b.body_id === 399)) {
+        $bodySelect.value = "399";
+      }
+      onBodySelect();
+    }
+
+    // ─── Render the selected body + its surface features ──────────────────
+    async function onBodySelect() {
+      $err.textContent = "";
+      clearEntities();
+
+      const id = parseInt($bodySelect.value, 10);
+      const body = allBodies.find(b => b.body_id === id);
+      if (!body) { showErr("body not found"); return; }
+
+      $meta.innerHTML = `
+        <b>${body.name}</b><br>
+        <span style="opacity:.7">class:</span> ${body.body_class}<br>
+        ${body.frame   ? `<span style="opacity:.7">frame:</span> ${body.frame}<br>` : ""}
+        ${body.radius_km   ? `<span style="opacity:.7">radius:</span> ${body.radius_km.toLocaleString()} km<br>` : ""}
+        ${body.gravity_ms2 ? `<span style="opacity:.7">gravity:</span> ${body.gravity_ms2} m/s²<br>` : ""}
+        ${body.distance_pc ? `<span style="opacity:.7">distance:</span> ${body.distance_pc} pc<br>` : ""}
+      `;
+
+      // Pull surface features for this body. Cesium's default ellipsoid is
+      // Earth's WGS84 — we plot every body's features on it for now (v1 demo).
+      let features = [];
+      try {
+        features = await api(`/api/bodies/${id}/features`);
+      } catch (e) {
+        // 404 just means no features for that body, that's fine
+        features = [];
+      }
+
+      $count.textContent =
+        features.length === 0
+          ? "(no surface features cataloged for this body)"
+          : `${features.length} surface feature${features.length === 1 ? "" : "s"} plotted`;
+
+      // For surface features without lat/lon we skip the pin.
+      for (const f of features) {
+        if (f.lat == null || f.lon == null) continue;
+        const color = featureColor[f.feature_type] || Cesium.Color.WHITE;
+        const ent = viewer.entities.add({
+          position: Cesium.Cartesian3.fromDegrees(f.lon, f.lat, 0),
+          point: {
+            pixelSize: 10,
+            color,
+            outlineColor: Cesium.Color.BLACK,
+            outlineWidth: 1.5,
+            heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+          },
+          label: {
+            text: f.name,
+            font: "12px sans-serif",
+            fillColor: Cesium.Color.WHITE,
+            outlineColor: Cesium.Color.BLACK,
+            outlineWidth: 2,
+            style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+            verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+            pixelOffset: new Cesium.Cartesian2(0, -8),
+            scale: 0.85,
+            translucencyByDistance: new Cesium.NearFarScalar(2e6, 1, 2e7, 0.2),
+          },
+          description: `
+            <table>
+              <tr><th>type</th><td>${f.feature_type ?? "—"}</td></tr>
+              <tr><th>lat</th><td>${f.lat}</td></tr>
+              <tr><th>lon</th><td>${f.lon}</td></tr>
+              <tr><th>source</th><td>${f.source ?? "—"}</td></tr>
+              ${f.meta ? `<tr><th>meta</th><td><pre>${JSON.stringify(f.meta, null, 2)}</pre></td></tr>` : ""}
+            </table>`,
+        });
+        currentEntities.push(ent);
+      }
+
+      // Re-frame to give a globe-ish view of this body's plotted features.
+      if (features.length > 0) {
+        viewer.flyTo(currentEntities, { duration: 1.5 });
+      } else {
+        viewer.camera.flyHome(1.5);
+      }
+    }
+
+    $bodySelect.addEventListener("change", onBodySelect);
+    loadBodies();
+  </script>
+</body>
+</html>

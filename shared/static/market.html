@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Wayfarer — Supply</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="/static/css/wayfarer.css" />
+</head>
+<body>
+
+<div id="login">
+  <h2>Supply</h2>
+  <p>Sign in to post orders and bid on them.</p>
+  <form id="login-form">
+    <label class="field"><span class="label">Email</span>
+      <input id="email" type="email" autocomplete="username" required /></label>
+    <label class="field"><span class="label">Password</span>
+      <input id="password" type="password" autocomplete="current-password" required /></label>
+    <button type="submit">Sign in</button>
+    <div class="err" id="login-err"></div>
+  </form>
+</div>
+
+<div id="app" style="display:none">
+  <header>
+    <h1>Wayfarer <span class="ident">supply</span></h1>
+    <nav>
+      <a href="/static/console.html">Console</a>
+      <a href="/static/resources.html">Resources</a>
+      <a href="/static/market.html" aria-current="page">Supply</a>
+      <a href="/static/map.html">Map</a>
+      <button class="linkish" id="signout" type="button">Sign out</button>
+    </nav>
+  </header>
+
+  <div class="wrap">
+
+    <!-- Shown only when the signed-in user has no payout wallet. Settlement is
+         refused without one (there would be nobody to confirm was paid), so
+         this is the fix for that refusal rather than a general setting. -->
+    <div class="card" id="walletcard" style="display:none;margin-bottom:16px">
+      <div class="sectionhead" style="margin-top:0">
+        <h2 style="font-size:15px">Payout wallet needed</h2>
+        <span class="pill unknown">not set</span>
+      </div>
+      <p class="muted" style="margin:0 0 12px;font-size:13px;max-width:70ch">
+        A payment can only be confirmed if there is an address to confirm it
+        reached. Until you set one, you can bid and ship, but settlements you
+        are the payee of will be refused.
+      </p>
+      <form id="walletform" class="grid" style="grid-template-columns:1fr auto;gap:10px;align-items:end">
+        <label class="field"><span class="label">Solana address</span>
+          <input id="w-addr" class="mono" placeholder="9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM" required /></label>
+        <button type="submit">Save</button>
+      </form>
+      <div class="err" id="wallet-err"></div>
+    </div>
+
+    <div class="sectionhead">
+      <h2>Open orders</h2>
+      <span class="label" id="ordercount">—</span>
+    </div>
+    <p class="muted" style="margin:0 0 14px;font-size:13px;max-width:70ch">
+      An order is a need broadcast to the fabric. Any outpost can bid to carry it;
+      the requester picks one. Payment settles only once the transfer is confirmed.
+    </p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>What</th><th>Kind</th><th class="num">Qty</th><th class="num">Ceiling</th>
+          <th>State</th><th class="num">Bids</th><th></th>
+        </tr></thead>
+        <tbody id="orders"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+
+    <div id="detail"></div>
+
+    <div class="sectionhead"><h2>Post an order</h2><span class="label">Broadcast a need</span></div>
+    <div class="card">
+      <form id="neworder">
+        <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:13px">
+          <label class="field"><span class="label">What you need</span>
+            <input id="o-desc" placeholder="500L potable water" required /></label>
+          <label class="field"><span class="label">Kind</span>
+            <select id="o-kind">
+              <option value="consumable">Consumable</option>
+              <option value="part">Part</option>
+              <option value="equipment">Equipment</option>
+              <option value="crew">Crew</option>
+            </select></label>
+          <label class="field"><span class="label">Quantity</span>
+            <input id="o-qty" type="number" step="any" value="1" required /></label>
+          <label class="field"><span class="label">Unit</span>
+            <input id="o-unit" placeholder="L" value="unit" /></label>
+          <label class="field"><span class="label">Price ceiling (TIDAT)</span>
+            <input id="o-max" type="number" step="any" placeholder="optional" /></label>
+        </div>
+        <button type="submit">Post order</button>
+        <div class="err" id="order-err"></div>
+      </form>
+    </div>
+
+    <div class="sectionhead"><h2>Deliveries</h2><span class="label">Accepted bids in progress</span></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>Order</th><th>Stage</th><th>Settlement</th><th>Amount</th><th>Age</th><th></th>
+        </tr></thead>
+        <tbody id="fulfilments"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+
+  </div>
+</div>
+
+<script type="module">
+import { api, boot, ageSince, el, setText, esc } from "/static/js/wayfarer.js";
+
+let openOrderId = null;
+
+const ORDER_PILL = {
+  posted: "wait", bid: "wait", accepted: "ok", shipped: "ok",
+  delivered: "ok", settling: "unknown", settled: "ok", cancelled: "idle",
+};
+
+/* Settlement is the one place where "done" and "proven" differ, so it gets
+ * its own vocabulary rather than being folded into the order state. */
+const SETTLE = {
+  pending:      ["unknown", "confirming"],
+  verified:     ["ok",      "confirmed"],
+  rejected:     ["bad",     "disputed"],
+  unverifiable: ["unknown", "unconfirmed"],
+  skipped:      ["idle",    "not checked"],
+};
+
+async function refresh() {
+  const orders = await api("/orders");
+  setText("ordercount", `${orders.length} total`);
+
+  const body = el("orders");
+  if (!orders.length) {
+    body.innerHTML = `<tr><td colspan="7" class="empty">
+      No orders yet. Post one below to broadcast a need to the fabric.</td></tr>`;
+  } else {
+    body.innerHTML = orders.map((o) => `<tr>
+      <td>${esc(o.description)}</td>
+      <td class="muted">${esc(o.item_kind)}</td>
+      <td class="num">${esc(o.quantity)} ${esc(o.unit)}</td>
+      <td class="num">${o.max_price != null ? esc(o.max_price) : '<span class="muted">—</span>'}</td>
+      <td><span class="pill ${ORDER_PILL[o.status] ?? "idle"}">${esc(o.status)}</span></td>
+      <td class="num" data-bids="${esc(o.id)}">·</td>
+      <td><button class="ghost" data-open="${esc(o.id)}" type="button">Bids</button></td>
+    </tr>`).join("");
+
+    body.querySelectorAll("[data-open]").forEach((b) =>
+      b.addEventListener("click", () => openOrder(b.dataset.open)));
+  }
+
+  if (openOrderId) await openOrder(openOrderId, true);
+  await refreshFulfilments(orders);
+}
+
+async function openOrder(id, quiet = false) {
+  openOrderId = id;
+  const { order, bids } = await api(`/orders/${id}`);
+  const detail = el("detail");
+
+  detail.innerHTML = `
+    <div class="card" style="margin-top:15px">
+      <div class="sectionhead" style="margin:0 0 12px">
+        <h2>${esc(order.description)}</h2>
+        <button class="linkish" id="closedetail" type="button" style="color:var(--dim)">Close</button>
+      </div>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th class="num">Price</th><th class="num">Transit</th><th>State</th><th>Placed</th><th></th></tr></thead>
+          <tbody>
+            ${bids.length ? bids.map((b) => `<tr>
+              <td class="num">${esc(b.price)} TIDAT</td>
+              <td class="num">${b.transit_days != null ? esc(b.transit_days) + " d" : "—"}</td>
+              <td><span class="pill ${b.status === "accepted" ? "ok" : b.status === "rejected" ? "idle" : "wait"}">${esc(b.status)}</span></td>
+              <td class="mono muted">${ageSince(b.created_at)} ago</td>
+              <td>${b.status === "submitted" && (order.status === "posted" || order.status === "bid")
+                    ? `<button data-accept="${esc(b.id)}" type="button">Accept</button>` : ""}</td>
+            </tr>`).join("")
+            : `<tr><td colspan="5" class="empty">No bids yet. Carriers see this order in their own console.</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+
+      ${(order.status === "posted" || order.status === "bid") ? `
+        <div style="margin-top:15px;display:flex;gap:9px;flex-wrap:wrap;align-items:flex-end">
+          <label class="field" style="flex:1;min-width:135px;margin:0">
+            <span class="label">Your price (TIDAT)</span>
+            <input id="bid-price" type="number" step="any" /></label>
+          <label class="field" style="flex:1;min-width:135px;margin:0">
+            <span class="label">Transit days</span>
+            <input id="bid-days" type="number" step="any" /></label>
+          <button id="placebid" type="button">Place bid</button>
+        </div>
+        <div class="err" id="bid-err"></div>` : ""}
+    </div>`;
+
+  el("closedetail").addEventListener("click", () => { openOrderId = null; detail.innerHTML = ""; });
+
+  detail.querySelectorAll("[data-accept]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      b.disabled = true;
+      try {
+        await api(`/orders/${id}/bids/${b.dataset.accept}/accept`, { method: "POST" });
+        await refresh();
+      } catch (e) { alert(e.message); b.disabled = false; }
+    }));
+
+  const place = el("placebid");
+  if (place) place.addEventListener("click", async () => {
+    const err = el("bid-err"); err.textContent = "";
+    try {
+      await api(`/orders/${id}/bids`, {
+        method: "POST",
+        body: JSON.stringify({
+          price: Number(el("bid-price").value),
+          transit_days: el("bid-days").value ? Number(el("bid-days").value) : null,
+        }),
+      });
+      await refresh();
+    } catch (e) {
+      /* The API 403s a requester bidding on their own order — say so plainly
+       * rather than showing a bare status code. */
+      err.textContent = /403|Forbidden/.test(e.message)
+        ? "You can't bid on an order you posted."
+        : e.message;
+    }
+  });
+
+  if (!quiet) detail.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+async function refreshFulfilments(orders) {
+  const active = orders.filter((o) => ["accepted", "shipped", "delivered", "settling", "settled"].includes(o.status));
+  const body = el("fulfilments");
+
+  if (!active.length) {
+    body.innerHTML = `<tr><td colspan="6" class="empty">Nothing in transit. Accept a bid to start a delivery.</td></tr>`;
+    return;
+  }
+
+  const rows = await Promise.all(active.map(async (o) => {
+    try {
+      const f = await api(`/fulfillments/by-order/${o.id}`);
+      const [tone, word] = SETTLE[f.settlement_status] ?? ["idle", "not started"];
+      const next = { preparing: "ship", in_transit: "deliver", delivered: "settle" }[f.status];
+      return `<tr>
+        <td>${esc(o.description)}</td>
+        <td><span class="pill ${ORDER_PILL[f.status] ?? "idle"}">${esc(f.status)}</span></td>
+        <td><span class="pill ${tone}">${word}</span>${
+          f.settlement_error ? `<div class="muted mono" style="margin-top:4px">${esc(f.settlement_error)}</div>` : ""}</td>
+        <td class="num">${f.settlement_amount != null ? esc(f.settlement_amount) : "—"}</td>
+        <td class="mono muted">${ageSince(f.created_at)}</td>
+        <td>${next ? `<button class="ghost" data-step="${next}" data-f="${esc(f.id)}" type="button">Mark ${next}</button>` : ""}</td>
+      </tr>`;
+    } catch {
+      return `<tr><td>${esc(o.description)}</td><td colspan="5" class="muted">Delivery details unavailable.</td></tr>`;
+    }
+  }));
+
+  body.innerHTML = rows.join("");
+  body.querySelectorAll("[data-step]").forEach((b) =>
+    b.addEventListener("click", () => advance(b.dataset.f, b.dataset.step)));
+}
+
+/// Reveal the wallet prompt only when there isn't one — an address already on
+/// file is not something the operator needs to look at.
+async function checkWallet() {
+  try {
+    const w = await api("/me/wallet");
+    el("walletcard").style.display = w.wallet_address ? "none" : "";
+  } catch {
+    // A core too old to expose /me/wallet shouldn't break the marketplace.
+    el("walletcard").style.display = "none";
+  }
+}
+
+el("walletform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const err = el("wallet-err"); err.textContent = "";
+  try {
+    await api("/me/wallet", {
+      method: "PUT",
+      body: JSON.stringify({ wallet_address: el("w-addr").value.trim() }),
+    });
+    el("walletcard").style.display = "none";
+  } catch (ex) {
+    err.textContent = /400/.test(ex.message)
+      ? "That isn't a valid Solana address (32–44 base58 characters)."
+      : ex.message;
+  }
+});
+
+async function advance(fid, step) {
+  if (step === "settle") {
+    const tx = prompt("Transaction signature for this payment:");
+    if (!tx) return;
+    try {
+      await api(`/fulfillments/${fid}/settle`, { method: "POST", body: JSON.stringify({ settlement_tx: tx.trim() }) });
+    } catch (e) {
+      if (/412/.test(e.message)) {
+        // Refused because there is nothing to verify the payment against.
+        // Surface the fix rather than the error.
+        alert("This settlement can't be confirmed yet: the shipper has no payout wallet on file.");
+        await checkWallet();
+        el("walletcard").scrollIntoView({ behavior: "smooth", block: "center" });
+        return;
+      }
+      alert(/400/.test(e.message)
+        ? "That isn't a valid transaction signature, so it wasn't recorded."
+        : e.message);
+      return;
+    }
+  } else {
+    try { await api(`/fulfillments/${fid}/${step}`, { method: "POST", body: "{}" }); }
+    catch (e) { alert(e.message); return; }
+  }
+  await refresh();
+}
+
+el("neworder").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const err = el("order-err"); err.textContent = "";
+  try {
+    await api("/orders", {
+      method: "POST",
+      body: JSON.stringify({
+        description: el("o-desc").value,
+        item_kind: el("o-kind").value,
+        quantity: Number(el("o-qty").value),
+        unit: el("o-unit").value || "unit",
+        max_price: el("o-max").value ? Number(el("o-max").value) : null,
+      }),
+    });
+    el("neworder").reset();
+    await refresh();
+  } catch (ex) { err.textContent = ex.message; }
+});
+
+boot(() => {
+  checkWallet().catch((e) => console.error(e));
+  return refresh().catch((e) => console.error(e));
+}, 8000);
+</script>
+</body>
+</html>

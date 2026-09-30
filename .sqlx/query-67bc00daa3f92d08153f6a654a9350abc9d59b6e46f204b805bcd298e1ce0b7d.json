@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO fleet_telemetry (\n            asset_id, node_id, timestamp,\n            lat, lon, alt,\n            speed, heading,\n            inclination, apogee, perigee,\n            battery, temperature,\n            signal_db, latency_ms, packet_loss,\n            anomaly_score, tamper, malware_flag\n        )\n        VALUES (\n            $1, $2, COALESCE($3, NOW()),\n            $4, $5, $6,\n            $7, $8,\n            $9, $10, $11,\n            $12, $13,\n            $14, $15, $16,\n            $17, $18, $19\n        )\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Timestamptz",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Bool",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "67bc00daa3f92d08153f6a654a9350abc9d59b6e46f204b805bcd298e1ce0b7d"
+}

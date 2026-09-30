@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE command_queue SET status='acked', acked_at=NOW() WHERE id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cd1b5edee22fc4ef6a9cd8ee89b021e6615259c75cf4243bdad4cf9cad721722"
+}

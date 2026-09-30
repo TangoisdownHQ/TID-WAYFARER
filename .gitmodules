@@ -1,0 +1,8 @@
+[submodule "liboqs"]
+    path = liboqs
+    url = https://github.com/open-quantum-safe/liboqs.git
+
+[submodule "liboqs-python"]
+    path = liboqs-python
+    url = https://github.com/open-quantum-safe/liboqs-python.git
+

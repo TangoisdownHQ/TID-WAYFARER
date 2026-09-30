@@ -1,0 +1,67 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tid-wayfarer-operator-manager-role
+rules:
+  - apiGroups: ["wayfarer.tid.net"]
+    resources: ["outposts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["wayfarer.tid.net"]
+    resources: ["outposts/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["wayfarer.tid.net"]
+    resources: ["outposts/finalizers"]
+    verbs: ["update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps", "secrets", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tid-wayfarer-operator-manager-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tid-wayfarer-operator-manager-role
+subjects:
+  - kind: ServiceAccount
+    name: tid-wayfarer-operator-controller-manager
+    namespace: tid-wayfarer-system
+---
+# Leader-election lease permissions (namespaced).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tid-wayfarer-operator-leader-election-role
+  namespace: tid-wayfarer-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tid-wayfarer-operator-leader-election-rolebinding
+  namespace: tid-wayfarer-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: tid-wayfarer-operator-leader-election-role
+subjects:
+  - kind: ServiceAccount
+    name: tid-wayfarer-operator-controller-manager
+    namespace: tid-wayfarer-system

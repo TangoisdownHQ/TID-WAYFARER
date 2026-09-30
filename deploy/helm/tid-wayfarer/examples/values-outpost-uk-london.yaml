@@ -1,0 +1,38 @@
+# =============================================================
+# 🇬🇧  Regional outpost — UK London (Earth)
+# Registers with Core HQ on startup, then syncs via the mesh.
+#
+# helm install outpost-uk ./TIDasONE/deploy/helm/tid-wayfarer \
+#   -f examples/values-outpost-uk-london.yaml \
+#   -n tid-wayfarer-uk --create-namespace
+# =============================================================
+
+outpost:
+  name: tid-wayfarer-outpost-uk-london
+  role: outpost
+  bodyId: 399                # Earth
+  location:
+    lat: 51.5074
+    lon: -0.1278
+    region: "UK-London"
+
+replicaCount: 1
+
+peers:
+  # Outpost registers with Core HQ on boot. Reachable via Core's public ingress.
+  coreApiUrl: "https://core.wayfarer.example.com/api/nodes/register"
+
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: uk-london.wayfarer.example.com
+      paths: ["/"]
+
+secret:
+  jwt: REPLACE_WITH_STRONG_RANDOM
+  dbPassword: REPLACE_WITH_STRONG_RANDOM
+
+postgres:
+  enabled: true
+  storageSize: 20Gi

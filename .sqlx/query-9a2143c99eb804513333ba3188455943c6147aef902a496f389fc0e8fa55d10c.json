@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id::text, asset_id::text as \"asset_id?\", cmd_type, payload, created_at\n        FROM commands\n        WHERE target_node = $1 AND status = 'queued'\n        ORDER BY created_at ASC\n        LIMIT 20\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "asset_id?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "cmd_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "payload",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 4,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "9a2143c99eb804513333ba3188455943c6147aef902a496f389fc0e8fa55d10c"
+}

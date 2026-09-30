@@ -1,0 +1,29 @@
+# Ignore build artifacts and dependencies
+target/
+node_modules/
+
+# Ignore config & environment secrets
+.env
+*.pem
+*.key
+*.crt
+*.der
+*.p12
+*.enc
+
+# Ignore local docs, tests, and scripts
+docs/
+Documentation/
+- scripts/
+test_*.py
+
+# Ignore backups and local data
+*.log
+*.tmp
+*.bak
+*.swp
+postgres-data/
+keys/
+liboqs/
+liboqs-python/
+

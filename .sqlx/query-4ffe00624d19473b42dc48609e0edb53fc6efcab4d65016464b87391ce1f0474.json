@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                        UPDATE blockchain_feed_queue\n                        SET processed = true\n                        WHERE id = $1\n                        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4ffe00624d19473b42dc48609e0edb53fc6efcab4d65016464b87391ce1f0474"
+}

@@ -1,0 +1,56 @@
+// Declare all submodules
+pub mod auth;
+pub mod assets;
+pub mod inventory;
+pub mod packages;
+pub mod user;
+pub mod commsec;
+pub mod auth_middleware;
+pub mod supplylink;
+pub mod local_auth;
+pub mod me;
+pub mod nodes;
+pub mod nodes_sync;
+pub mod commands;
+pub mod blockchain;
+pub mod dashboard;
+pub mod assets_fleet;
+pub mod fleet_map;
+pub mod map;
+pub mod bodies;
+pub mod asset_logistics;
+pub mod orders;
+pub mod rules;
+pub mod peers;
+pub mod ops;
+pub mod dtn;
+pub mod fabric;
+pub mod request_trace;
+pub mod rollup;
+
+// Re-export route functions
+pub use auth::auth_routes;
+pub use assets::asset_routes;
+pub use inventory::inventory_routes;
+pub use packages::package_routes;
+pub use user::user_routes;
+pub use commsec::commsec_routes;
+pub use me::me_routes;
+pub use nodes::node_routes;
+pub use nodes_sync::node_sync_routes;
+pub use commands::command_routes;
+pub use blockchain::blockchain_routes;
+pub use dashboard::dashboard_routes;
+pub use assets_fleet::fleet_asset_routes; // ✅ fleet re-export
+pub use fleet_map::fleet_map_routes;
+pub use map::map_routes;
+pub use bodies::body_routes;
+pub use asset_logistics::{asset_extras_routes, kit_routes};
+pub use orders::{order_routes, fulfillment_routes};
+pub use rules::rules_routes;
+pub use peers::peer_routes;
+pub use ops::ops_routes;
+pub use dtn::dtn_routes;
+pub use fabric::fabric_routes;
+pub use supplylink::supplylink_routes;
+pub use rollup::rollup_routes;

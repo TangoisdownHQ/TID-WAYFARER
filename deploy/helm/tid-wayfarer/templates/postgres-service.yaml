@@ -1,0 +1,19 @@
+{{- if .Values.postgres.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-postgres
+  labels:
+    {{- include "tid-wayfarer.labels" . | nindent 4 }}
+    wayfarer.tid.net/component: postgres
+spec:
+  type: ClusterIP
+  clusterIP: None        # headless — StatefulSet DNS
+  ports:
+  - port: 5432
+    targetPort: 5432
+    name: postgres
+  selector:
+    {{- include "tid-wayfarer.selectorLabels" . | nindent 4 }}
+    wayfarer.tid.net/component: postgres
+{{- end }}

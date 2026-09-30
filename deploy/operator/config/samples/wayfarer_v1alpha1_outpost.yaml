@@ -1,0 +1,40 @@
+# Core HQ on Earth (NAIF 399). Embedded Postgres, migrations on, public later via Ingress.
+apiVersion: wayfarer.tid.net/v1alpha1
+kind: Outpost
+metadata:
+  name: core-hq
+  namespace: tid-wayfarer
+spec:
+  role: core
+  bodyId: 399
+  region: US-East-NYC
+  replicas: 1
+  image:
+    repository: tid-wayfarer
+    tag: latest
+    pullPolicy: IfNotPresent
+  postgres:
+    enabled: true
+    database: tidasone
+    storageSize: 5Gi
+  migrate: true
+---
+# Off-world surface outpost on Mars (Jezero). No synchronous link to Core —
+# the DTN forwarder in the API handles eventual mesh sync.
+apiVersion: wayfarer.tid.net/v1alpha1
+kind: Outpost
+metadata:
+  name: outpost-mars-jezero
+  namespace: tid-wayfarer
+spec:
+  role: outpost
+  bodyId: 499
+  region: Mars-Jezero
+  replicas: 1
+  peers:
+    coreApiUrl: https://core.wayfarer.example.com/api/nodes/register
+  postgres:
+    enabled: true
+    database: tidasone
+    storageSize: 5Gi
+  migrate: true

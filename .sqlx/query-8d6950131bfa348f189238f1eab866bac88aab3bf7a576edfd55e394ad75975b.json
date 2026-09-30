@@ -1,0 +1,83 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT body_id, name, parent_id, body_class, frame,\n               radius_km, gravity_ms2, rotation_hr, ephemeris_src,\n               distance_pc, meta\n        FROM bodies\n        WHERE ($1::text IS NULL OR body_class = $1)\n          AND ($2::int  IS NULL OR parent_id  = $2)\n        ORDER BY\n          CASE body_class\n            WHEN 'star'         THEN 0\n            WHEN 'planet'       THEN 1\n            WHEN 'dwarf_planet' THEN 2\n            WHEN 'moon'         THEN 3\n            WHEN 'asteroid'     THEN 4\n            WHEN 'exoplanet'    THEN 5\n            ELSE 9\n          END,\n          body_id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "body_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "parent_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "body_class",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "frame",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "radius_km",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 6,
+        "name": "gravity_ms2",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 7,
+        "name": "rotation_hr",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 8,
+        "name": "ephemeris_src",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "distance_pc",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 10,
+        "name": "meta",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "8d6950131bfa348f189238f1eab866bac88aab3bf7a576edfd55e394ad75975b"
+}

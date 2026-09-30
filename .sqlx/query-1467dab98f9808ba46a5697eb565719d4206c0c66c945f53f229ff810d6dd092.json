@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO node_registry (node_id, name, api_endpoint, public_key, last_seen)\n        VALUES ($1, $2, $3, $4, NOW())\n        ON CONFLICT (node_id) DO UPDATE SET\n            name = EXCLUDED.name,\n            api_endpoint = EXCLUDED.api_endpoint,\n            public_key = EXCLUDED.public_key,\n            last_seen = NOW()\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1467dab98f9808ba46a5697eb565719d4206c0c66c945f53f229ff810d6dd092"
+}

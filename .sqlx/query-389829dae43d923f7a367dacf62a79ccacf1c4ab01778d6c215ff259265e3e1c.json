@@ -1,0 +1,88 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE packages\n        SET status       = COALESCE($2, status),\n            description  = COALESCE($3, description),\n            location     = COALESCE($4, location),\n            eta          = COALESCE($5, eta),\n            nft_token    = COALESCE($6, nft_token),\n            nft_image_url= COALESCE($7, nft_image_url)\n        WHERE id = $1\n        RETURNING id, owner_id, inventory_item_id, status, description,\n                  location, nft_token, nft_image_url, eta,\n                  created_at, completed_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "owner_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "inventory_item_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "location",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "nft_token",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "nft_image_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "eta",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 9,
+        "name": "created_at",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 10,
+        "name": "completed_at",
+        "type_info": "Timestamp"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Timestamp",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "389829dae43d923f7a367dacf62a79ccacf1c4ab01778d6c215ff259265e3e1c"
+}

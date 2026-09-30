@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO fleet_assets (id, node_id, asset_type, name, last_seen)\n        VALUES ($1, $2, $3, $4, NOW())\n        ON CONFLICT (id) DO UPDATE\n        SET node_id = EXCLUDED.node_id,\n            name = EXCLUDED.name,\n            last_seen = NOW()\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "af787328d6da35f951167876159ccef7132da58e4abe80397ee72fdb08466c27"
+}

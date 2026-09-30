@@ -1,0 +1,121 @@
+# ============================================================
+# 🛰️  TIDasONE outpost — Helm values
+# Each Helm release == one outpost. Set role + body + location.
+# ============================================================
+
+# -- Outpost identity & location --------------------------------------
+outpost:
+  name: tid-wayfarer-outpost-default
+  role: core              # core | outpost
+  bodyId: 399             # NAIF id — Earth=399, Moon=301, Mars=499, Jupiter=599 …
+  location:
+    lat: null             # body-fixed coords
+    lon: null
+    alt: null
+    region: ""            # human label: "US-East", "UK-London", "Mars-Jezero" …
+
+# -- API image --------------------------------------------------------
+image:
+  repository: tid-wayfarer
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# -- API replica count ------------------------------------------------
+# 1 is safe with the default ReadWriteOnce keys volume. Scale beyond 1
+# only with a ReadWriteMany storage class or by disabling `keys.enabled`.
+replicaCount: 1
+
+# -- Service --------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 3000
+
+# -- Ingress (external HTTP access) ---------------------------------
+ingress:
+  enabled: false
+  className: ""
+  hosts:
+    - host: tid-wayfarer.local
+      paths: ["/"]
+  tls: []
+
+# -- Mesh peers — outposts to register with on startup --------------
+peers:
+  coreApiUrl: ""          # e.g. https://core.wayfarer.example.com/api/nodes/register
+  bootstrap: []           # extra peer URLs (future use)
+
+# -- Fabric authentication ------------------------------------------
+# How peer outposts authenticate to this one:
+#   both   - per-node Ed25519 signature OR the shared token (default; use
+#            while rolling an existing fabric onto signed auth)
+#   signed - signatures only; secret.nodeShared remains only as the
+#            bootstrap credential for /api/nodes/register
+#   legacy - shared token only (rollback escape hatch)
+fabricAuth: both
+
+# -- Secrets (REPLACE!) ---------------------------------------------
+secret:
+  jwt: changeme
+  dbPassword: changeme
+  # Fabric-wide node sync secret — must be identical on every outpost
+  # that syncs with this one (generate: openssl rand -hex 32)
+  nodeShared: changeme
+
+# -- Embedded postgres ---------------------------------------------
+postgres:
+  enabled: true           # set false to use externalDatabase
+  image: postgres:16-alpine
+  storageClass: ""        # "" = cluster default
+  storageSize: 20Gi
+  user: postgres
+  database: tidasone
+
+# -- External postgres (only if postgres.enabled = false) -----------
+externalDatabase:
+  host: ""
+  port: 5432
+  user: postgres
+  database: tidasone
+
+# -- Identity-key persistence (so node_id survives pod restarts) ----
+keys:
+  enabled: true
+  storageClass: ""
+  storageSize: 1Gi
+
+# -- Probes ---------------------------------------------------------
+probes:
+  startup:
+    path: /api/health
+    failureThreshold: 30  # 30 * 5s = 150s max startup time (covers migration)
+    periodSeconds: 5
+  liveness:
+    path: /healthz
+    initialDelaySeconds: 30
+    periodSeconds: 10
+  readiness:
+    path: /api/health
+    initialDelaySeconds: 5
+    periodSeconds: 5
+
+# -- Resources -----------------------------------------------------
+resources:
+  api:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+  postgres:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+
+# -- Migration Job --------------------------------------------------
+migrate:
+  enabled: true           # run all SQL migrations on install/upgrade
+  ttlSecondsAfterFinished: 600

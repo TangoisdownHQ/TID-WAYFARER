@@ -1,0 +1,20 @@
+html, body, #map {
+    height: 100%;
+    margin: 0;
+}
+
+.legend {
+    background: white;
+    padding: 6px 8px;
+    border-radius: 4px;
+}
+
+.popup h4 {
+    margin: 0 0 4px;
+}
+
+.anomaly {
+    color: #c00;
+    font-weight: bold;
+}
+

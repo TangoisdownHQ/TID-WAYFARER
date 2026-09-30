@@ -1,0 +1,17 @@
+{{- if .Values.keys.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "tid-wayfarer.fullname" . }}-keys
+  labels:
+    {{- include "tid-wayfarer.labels" . | nindent 4 }}
+    wayfarer.tid.net/component: keys
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- if .Values.keys.storageClass }}
+  storageClassName: {{ .Values.keys.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.keys.storageSize }}
+{{- end }}

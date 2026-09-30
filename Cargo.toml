@@ -1,0 +1,9 @@
+[workspace]
+members = [
+    "apps/api",
+    "packages/db"
+]
+
+# Recommended: Set correct resolver to match edition
+resolver = "2"
+

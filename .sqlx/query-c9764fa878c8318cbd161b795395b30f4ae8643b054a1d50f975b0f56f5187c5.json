@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO command_queue (asset_id, node_id, command, status)\n        VALUES ($1, $2, $3, 'queued')\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c9764fa878c8318cbd161b795395b30f4ae8643b054a1d50f975b0f56f5187c5"
+}

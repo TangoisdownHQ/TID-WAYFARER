@@ -1,0 +1,62 @@
+{{- if .Values.migrate.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "tid-wayfarer.fullname" . }}-migrate
+  labels:
+    {{- include "tid-wayfarer.labels" . | nindent 4 }}
+    wayfarer.tid.net/component: migrate
+  annotations:
+    # Run after the chart's resources exist (so postgres is reachable),
+    # and again on every upgrade so new migrations apply automatically.
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  ttlSecondsAfterFinished: {{ .Values.migrate.ttlSecondsAfterFinished }}
+  backoffLimit: 5
+  template:
+    metadata:
+      labels:
+        {{- include "tid-wayfarer.labels" . | nindent 8 }}
+        wayfarer.tid.net/component: migrate
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: migrate
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          echo "⏳ waiting for postgres at {{ include "tid-wayfarer.dbHost" . }}..."
+          for i in $(seq 1 60); do
+            if PGPASSWORD="$POSTGRES_PASSWORD" pg_isready \
+                 -h {{ include "tid-wayfarer.dbHost" . }} \
+                 -U {{ .Values.postgres.user }} \
+                 -d {{ .Values.postgres.database }} > /dev/null 2>&1; then
+              echo "✅ postgres reachable"
+              break
+            fi
+            sleep 2
+          done
+          echo "🧠 applying migrations..."
+          for f in /app/migrations/*.sql; do
+            echo "==> $f"
+            PGPASSWORD="$POSTGRES_PASSWORD" psql \
+              -h {{ include "tid-wayfarer.dbHost" . }} \
+              -U {{ .Values.postgres.user }} \
+              -d {{ .Values.postgres.database }} \
+              -v ON_ERROR_STOP=1 \
+              -f "$f"
+          done
+          echo "🎉 migrations complete"
+        env:
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "tid-wayfarer.fullname" . }}-secret
+              key: POSTGRES_PASSWORD
+{{- end }}

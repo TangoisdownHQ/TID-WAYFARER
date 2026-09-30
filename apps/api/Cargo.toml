@@ -1,0 +1,63 @@
+[package]
+name = "tid-wayfarer"
+version = "0.1.0"
+edition = "2021"
+
+# The library crate keeps an underscore name (`tid_wayfarer`) because Rust paths
+# can't contain hyphens; the binary keeps the hyphenated product name so the
+# release artifact and Docker COPY path are `tid-wayfarer`.
+[lib]
+name = "tid_wayfarer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tid-wayfarer"
+path = "src/main.rs"
+
+[dev-dependencies]
+tower = { version = "0.4", features = ["util"] }
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+serde_json = "1"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dotenvy = "0.15"
+sqlx = { version = "0.7", features = ["postgres", "runtime-tokio-rustls", "macros", "uuid", "rust_decimal", "chrono"] }
+uuid = { version = "1.8", features = ["v4", "v5"] }
+core-db = { path = "../../packages/db" }
+chrono = { version = "0.4", features = ["serde"] }
+jsonwebtoken = "9"
+axum-extra = { version = "0.9", features = ["typed-header"] }
+reqwest = { version = "0.12", features = ["json"] }
+argon2 = "0.5"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+tower-http = { version = "0.5", features = ["cors", "fs"] }
+hmac = "0.12"
+hex = "0.4"
+
+
+
+# --- Post-Quantum Cryptography (PQC) ---
+pqcrypto-mlkem = "0.1"
+pqcrypto-mldsa = "0.1"
+pqcrypto-traits = "0.3"
+
+# --- Symmetric AEAD + KDF ---
+chacha20poly1305 = "0.10"
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+
+# --- Helpers ---
+rand = "0.8"
+base64 = "0.22"
+anyhow = "1"
+oauth2 = "4"
+rust_decimal = { version = "1.42.1", features = ["serde", "serde-with-float"] }
+

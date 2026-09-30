@@ -1,0 +1,83 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT a.*\n        FROM assignments a\n        JOIN assets s ON a.asset_id = s.id\n        WHERE a.id = $1 AND s.owner_id = $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "asset_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "package_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "inventory_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "schedule_start",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 5,
+        "name": "schedule_end",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 6,
+        "name": "recurrence_rule",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "eta",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 8,
+        "name": "completed_at",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 9,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "created_at",
+        "type_info": "Timestamp"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "46de9c59924dd49b94656319809c94073ebd7f6ad5dbd94a8ad7b2c05ae0ea5e"
+}

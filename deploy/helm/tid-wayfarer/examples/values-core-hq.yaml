@@ -1,0 +1,36 @@
+# =============================================================
+# 🛰️  Core HQ outpost — US East
+# helm install core ./TIDasONE/deploy/helm/tid-wayfarer \
+#   -f examples/values-core-hq.yaml -n tid-wayfarer --create-namespace
+# =============================================================
+
+outpost:
+  name: tid-wayfarer-core-hq
+  role: core
+  bodyId: 399                # Earth
+  location:
+    lat: 40.7128
+    lon: -74.0060
+    region: "US-East-NYC"
+
+replicaCount: 1
+
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: core.wayfarer.example.com
+      paths: ["/"]
+  tls:
+    - secretName: tid-wayfarer-core-tls
+      hosts:
+        - core.wayfarer.example.com
+
+# ⚠️  REPLACE both before applying.
+secret:
+  jwt: REPLACE_WITH_STRONG_RANDOM
+  dbPassword: REPLACE_WITH_STRONG_RANDOM
+
+postgres:
+  enabled: true
+  storageSize: 50Gi

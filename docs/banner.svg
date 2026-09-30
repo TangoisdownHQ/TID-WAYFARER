@@ -1,0 +1,134 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" width="1200" height="360" role="img" aria-label="TID Wayfarer — logistics for operations that outlive their connectivity. One view of every resource across a farm, a ship, Earth HQ, the Moon and Mars; Mars is out of contact, which is a normal state, not a fault.">
+  <title>TID Wayfarer — logistics for operations that outlive their connectivity</title>
+
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#070b10"/>
+      <stop offset="0.55" stop-color="#0d1622"/>
+      <stop offset="1" stop-color="#101d2c"/>
+    </linearGradient>
+    <linearGradient id="rule" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#4cc9f0"/>
+      <stop offset="1" stop-color="#4cc9f0" stop-opacity="0"/>
+    </linearGradient>
+    <!-- Horizon glow: Earth below, everything else above it. -->
+    <radialGradient id="limb" cx="0.5" cy="1" r="0.75">
+      <stop offset="0" stop-color="#4cc9f0" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#4cc9f0" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1200" height="360" fill="url(#sky)"/>
+  <ellipse cx="880" cy="392" rx="420" ry="150" fill="url(#limb)"/>
+
+  <!-- Starfield -->
+  <g fill="#dce6f2">
+    <circle cx="646" cy="52"  r="1.1" opacity=".45"/>
+    <circle cx="712" cy="126" r="0.9" opacity=".30"/>
+    <circle cx="806" cy="44"  r="1.3" opacity=".55"/>
+    <circle cx="884" cy="96"  r="0.9" opacity=".28"/>
+    <circle cx="952" cy="58"  r="1.1" opacity=".42"/>
+    <circle cx="1048" cy="42" r="0.9" opacity=".33"/>
+    <circle cx="1124" cy="76" r="1.2" opacity=".50"/>
+    <circle cx="1160" cy="168" r="0.9" opacity=".26"/>
+    <circle cx="592" cy="92"  r="0.9" opacity=".24"/>
+    <circle cx="1004" cy="126" r="0.8" opacity=".22"/>
+  </g>
+
+  <!-- ─────────── Identity ─────────── -->
+  <g>
+    <text x="64" y="128" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+          font-size="52" font-weight="700" letter-spacing="1.5" fill="#dce6f2">TID WAYFARER</text>
+    <rect x="66" y="150" width="300" height="2" fill="url(#rule)"/>
+
+    <text x="64" y="196" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+          font-size="19" fill="#9fb3c8">A logistics ecosystem for operations spread</text>
+    <text x="64" y="222" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+          font-size="19" fill="#9fb3c8">across places that can't rely on a network.</text>
+
+    <g font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="12.5" fill="#6f8299">
+      <text x="64" y="268">Know what you hold, everywhere.</text>
+      <text x="64" y="290">Reorder Earth to orbit, orbit to Earth.</text>
+      <text x="64" y="312">Share capsule space. Keep working while dark.</text>
+    </g>
+  </g>
+
+  <!-- ─────────── One view over many locations ─────────── -->
+  <!-- The panel is the unified rollup; the threads descending from it are the
+       locations it aggregates. Mars answers in violet: out of contact is a
+       state the system names, not an error it hides. -->
+  <g>
+    <rect x="612" y="52" width="520" height="40" rx="8" fill="#0f1620" stroke="#2b3d52" stroke-width="1"/>
+    <circle cx="634" cy="72" r="3.5" fill="#4cc9f0"/>
+    <text x="650" y="77" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace"
+          font-size="12.5" fill="#dce6f2" letter-spacing="0.6">ONE VIEW — every resource, every location</text>
+
+    <!-- Aggregation threads -->
+    <g stroke="#2b3d52" stroke-width="1" fill="none" opacity="0.8">
+      <path d="M665 92 V 214 h -18"/>
+      <path d="M745 92 V 244"/>
+      <path d="M845 92 V 196"/>
+      <path d="M955 92 V 158"/>
+      <path d="M1075 92 V 118" stroke-dasharray="3 4"/>
+    </g>
+
+    <!-- Route between locations: solid where contact is routine, dashed where
+         it is scheduled or intermittent. -->
+    <g fill="none" stroke-width="1.6" opacity="0.85">
+      <path d="M647 214 C 690 232, 706 244, 745 244" stroke="#4ade80"/>
+      <path d="M745 244 C 790 244, 806 200, 845 196" stroke="#4ade80"/>
+      <path d="M845 196 C 890 190, 916 166, 955 158" stroke="#f5b544" stroke-dasharray="7 5"/>
+      <path d="M955 158 C 1004 148, 1036 128, 1075 118" stroke="#a78bfa" stroke-dasharray="4 6"/>
+    </g>
+
+    <!-- A shared capsule in transit: several parties' cargo, one hull. -->
+    <g transform="translate(900 176) rotate(-16)">
+      <rect x="-15" y="-6.5" width="30" height="13" rx="6.5" fill="#101d2c" stroke="#f5b544" stroke-width="1.2"/>
+      <line x1="-5" y1="-6.5" x2="-5" y2="6.5" stroke="#f5b544" stroke-width="0.9" opacity="0.75"/>
+      <line x1="5"  y1="-6.5" x2="5"  y2="6.5" stroke="#f5b544" stroke-width="0.9" opacity="0.75"/>
+    </g>
+    <text x="900" y="152" text-anchor="middle"
+          font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace"
+          font-size="10.5" fill="#f5b544" letter-spacing="0.5">shared capsule</text>
+
+    <!-- Locations. Ring colour is contact state, not health. -->
+    <g font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="11">
+      <g>
+        <circle cx="647" cy="214" r="8.5" fill="#0f1620" stroke="#4ade80" stroke-width="2"/>
+        <circle cx="647" cy="214" r="3" fill="#4ade80"/>
+        <text x="647" y="240" text-anchor="middle" fill="#9fb3c8">FARM</text>
+      </g>
+      <g>
+        <circle cx="745" cy="244" r="8.5" fill="#0f1620" stroke="#4ade80" stroke-width="2"/>
+        <circle cx="745" cy="244" r="3" fill="#4ade80"/>
+        <text x="745" y="270" text-anchor="middle" fill="#9fb3c8">PORT</text>
+      </g>
+      <g>
+        <circle cx="845" cy="196" r="10.5" fill="#0f1620" stroke="#4cc9f0" stroke-width="2"/>
+        <circle cx="845" cy="196" r="3.6" fill="#4cc9f0"/>
+        <text x="845" y="224" text-anchor="middle" fill="#dce6f2">EARTH HQ</text>
+      </g>
+      <g>
+        <circle cx="955" cy="158" r="8.5" fill="#0f1620" stroke="#4ade80" stroke-width="2"/>
+        <circle cx="955" cy="158" r="3" fill="#4ade80"/>
+        <text x="955" y="184" text-anchor="middle" fill="#9fb3c8">MOON</text>
+      </g>
+      <g>
+        <circle cx="1075" cy="118" r="8.5" fill="#0f1620" stroke="#a78bfa" stroke-width="2"/>
+        <text x="1075" y="144" text-anchor="middle" fill="#a78bfa">MARS</text>
+        <text x="1075" y="100" text-anchor="middle" font-size="10" fill="#a78bfa" opacity="0.9">out of contact</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- Contact-state key. The fourth state is the one that matters: unknown
+       because out of contact is not a fault. -->
+  <g font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="10.5" fill="#6f8299">
+    <circle cx="620" cy="316" r="3.5" fill="#4ade80"/>
+    <text x="632" y="320">in contact</text>
+    <circle cx="726" cy="316" r="3.5" fill="#f5b544"/>
+    <text x="738" y="320">scheduled window</text>
+    <circle cx="874" cy="316" r="3.5" fill="#a78bfa"/>
+    <text x="886" y="320">unknown — no contact, so no answer</text>
+  </g>
+</svg>

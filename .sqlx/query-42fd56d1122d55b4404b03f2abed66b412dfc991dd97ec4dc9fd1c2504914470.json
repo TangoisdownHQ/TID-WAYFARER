@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE node_registry\n        SET last_seen = NOW()\n        WHERE node_id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "42fd56d1122d55b4404b03f2abed66b412dfc991dd97ec4dc9fd1c2504914470"
+}

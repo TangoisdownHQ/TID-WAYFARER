@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Wayfarer — Outpost Console</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="/static/css/wayfarer.css" />
+</head>
+<body>
+
+<div id="login">
+  <h2>Outpost console</h2>
+  <p>Sign in to this outpost.</p>
+  <form id="login-form">
+    <label class="field"><span class="label">Email</span>
+      <input id="email" type="email" autocomplete="username" required /></label>
+    <label class="field"><span class="label">Password</span>
+      <input id="password" type="password" autocomplete="current-password" required /></label>
+    <button type="submit">Sign in</button>
+    <div class="err" id="login-err"></div>
+  </form>
+</div>
+
+<div id="app" style="display:none">
+  <header>
+    <h1>
+      Wayfarer
+      <span class="ident" id="ident">—</span>
+    </h1>
+    <nav>
+      <a href="/static/console.html" aria-current="page">Console</a>
+      <a href="/static/resources.html">Resources</a>
+      <a href="/static/market.html">Supply</a>
+      <a href="/static/map.html">Map</a>
+      <button class="linkish" id="signout" type="button">Sign out</button>
+    </nav>
+  </header>
+
+  <div class="wrap">
+
+    <!-- The signature element: how stale is everything below this line. -->
+    <div class="rail" id="rail">
+      <div class="since" id="since">—</div>
+      <div class="what">
+        <span class="label">Since last contact</span>
+        <p id="rail-note">Waiting for the first reading.</p>
+      </div>
+      <div style="text-align:right">
+        <span class="label">Outposts</span>
+        <div class="mono" id="nodesline" style="font-size:15px;margin-top:4px">—</div>
+      </div>
+    </div>
+
+    <div class="sectionhead">
+      <h2>Needs a decision</h2>
+      <span class="label" id="updated">—</span>
+    </div>
+    <div class="attention" id="attention"></div>
+
+    <div class="grid">
+      <div class="card">
+        <span class="label">Autonomy</span>
+        <div class="headline" id="firings">—</div>
+        <div class="stat"><span class="k">Rule firings, 24h</span><span class="v muted" id="firings-note">—</span></div>
+        <div class="stat"><span class="k">Queued</span><span class="v" id="queued">—</span></div>
+        <div class="stat"><span class="k">Awaiting ack</span><span class="v" id="unacked">—</span></div>
+        <div class="stat"><span class="k">Gave up</span><span class="v" id="cmdfailed">—</span></div>
+        <div class="stat"><span class="k">Telemetry backlog</span><span class="v" id="backlog">—</span></div>
+      </div>
+
+      <div class="card">
+        <span class="label">Comms</span>
+        <div class="headline" id="outbox">—</div>
+        <div class="stat"><span class="k">Held for delivery</span><span class="v muted" id="outbox-note">—</span></div>
+        <div class="stat"><span class="k">Unencrypted</span><span class="v" id="plaintext">—</span></div>
+        <div class="stat"><span class="k">Failed signature</span><span class="v" id="unverified">—</span></div>
+      </div>
+
+      <div class="card">
+        <span class="label">Supply</span>
+        <div class="headline" id="openorders">—</div>
+        <div class="stat"><span class="k">Open orders</span><span class="v muted" id="orders-note">—</span></div>
+        <div class="stat"><span class="k">In transit</span><span class="v" id="inflight">—</span></div>
+        <div class="stat"><span class="k">Awaiting settlement</span><span class="v" id="settling">—</span></div>
+        <div class="stat"><span class="k">Disputed</span><span class="v" id="disputed">—</span></div>
+      </div>
+    </div>
+
+    <div class="sectionhead"><h2>What happened</h2><span class="label">Most recent first</span></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>Age</th><th>Event</th><th>Outpost</th><th>Detail</th><th>Trace</th>
+        </tr></thead>
+        <tbody id="events"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="sectionhead"><h2>Trace a decision</h2><span class="label">Paste a trace id</span></div>
+    <div class="card">
+      <p class="muted" style="margin:0 0 12px;font-size:13px">
+        Every telemetry reading gets an id that follows it through the rules that fired,
+        the commands they queued, and what the outpost did about them.
+      </p>
+      <div style="display:flex;gap:9px;flex-wrap:wrap">
+        <input id="traceid" placeholder="00000000-0000-0000-0000-000000000000" style="flex:1;min-width:270px" />
+        <button id="tracego" type="button">Follow it</button>
+      </div>
+      <div class="err" id="trace-err"></div>
+      <div id="tracechain"></div>
+    </div>
+
+  </div>
+</div>
+
+<script type="module">
+import { api, boot, age, ageSince, freshness, el, setText, esc } from "/static/js/wayfarer.js";
+
+/* A count of zero is good news for failures and bad news for nothing —
+ * colour it by what it means, not by whether it is nonzero. */
+function stat(id, value, tone = null) {
+  const node = el(id);
+  if (!node) return;
+  node.textContent = value ?? "—";
+  node.className = "v " + (tone ?? (Number(value) === 0 ? "zero" : ""));
+}
+
+const TITLES = {
+  lockdown: "Outpost is locked down",
+  network_isolated: "Network isolated",
+  settlement_rejected: "Settlement disputed",
+  settlement_unverifiable: "Settlement never confirmed",
+  node_revoked: "Revoked outposts",
+  command_failed: "Commands not carried out",
+  dtn_unverified: "Messages failed verification",
+  dtn_plaintext: "Messages sent unencrypted",
+  nodes_offline: "Outposts out of contact",
+};
+
+async function refresh() {
+  const s = await api("/dashboard/summary");
+
+  setText("ident", `${s.outpost.name} · ${s.outpost.role}`);
+  setText("updated", `read ${new Date(s.updated_at).toLocaleTimeString()}`);
+
+  /* The rail. Nothing else on the page means much without it. */
+  const secs = s.fabric.lastContactSecs;
+  const f = s.fabric.total === 0 ? "unknown" : freshness(secs);
+  el("rail").className = `rail ${f}`;
+  setText("since", s.fabric.total === 0 ? "—" : age(secs));
+  setText("nodesline", `${s.fabric.online} live · ${s.fabric.stale} lagging · ${s.fabric.offline} dark`);
+  setText("rail-note", {
+    live: "Readings below are current.",
+    lagging: "Some outposts are late reporting. Values below may have moved on.",
+    dark: "Nothing has reported recently. Treat everything below as last-known, not current.",
+    unknown: "No outposts registered yet, so there is nothing to be current about.",
+  }[f]);
+
+  /* Attention list. Empty is the expected state. */
+  const box = el("attention");
+  if (!s.attention.length) {
+    box.innerHTML = `<div class="allclear"><strong>Nothing waiting on you.</strong>
+      The fabric is running itself — autonomy is handling telemetry and delivery.</div>`;
+  } else {
+    box.innerHTML = s.attention.map((a) => `
+      <div class="item ${esc(a.severity)}">
+        <span class="count">${a.count ?? "!"}</span>
+        <span class="body">
+          <strong>${esc(TITLES[a.kind] ?? a.kind)}</strong>
+          <span>${esc(a.detail)}</span>
+        </span>
+      </div>`).join("");
+  }
+
+  setText("firings", s.autonomy.firings24h);
+  setText("firings-note", "");
+  stat("queued", s.autonomy.queued, s.autonomy.queued > 0 ? "lagging" : "zero");
+  stat("unacked", s.autonomy.awaitingAck, s.autonomy.awaitingAck > 0 ? "unknown" : "zero");
+  stat("cmdfailed", s.autonomy.failed, s.autonomy.failed > 0 ? "dark" : "zero");
+  stat("backlog", s.autonomy.telemetryBacklog, s.autonomy.telemetryBacklog > 0 ? "lagging" : "zero");
+
+  setText("outbox", s.comms.dtnOutbox);
+  setText("outbox-note", "");
+  stat("plaintext", s.comms.dtnPlaintext, s.comms.dtnPlaintext > 0 ? "lagging" : "zero");
+  stat("unverified", s.comms.dtnUnverified, s.comms.dtnUnverified > 0 ? "dark" : "zero");
+
+  setText("openorders", s.logistics.openOrders);
+  setText("orders-note", "");
+  stat("inflight", s.logistics.inFlight, s.logistics.inFlight > 0 ? "live" : "zero");
+  stat("settling", s.logistics.settling, s.logistics.settling > 0 ? "unknown" : "zero");
+  stat("disputed", s.logistics.rejected, s.logistics.rejected > 0 ? "dark" : "zero");
+
+  renderEvents(await api("/dashboard/events"));
+}
+
+const SEV = { critical: "bad", error: "bad", high: "bad", warn: "wait", info: "idle" };
+
+function renderEvents(events) {
+  const body = el("events");
+  if (!events.length) {
+    body.innerHTML = `<tr><td colspan="5" class="empty">Nothing has happened yet.</td></tr>`;
+    return;
+  }
+  body.innerHTML = events.map((e) => {
+    const d = e.details || {};
+    const detail = d.rule
+      ? `${esc(d.rule)} — ${esc(d.metric)} was ${esc(d.value)} (limit ${esc(d.threshold)})`
+      : d.ack_status
+        ? `${esc(d.command?.type ?? "command")} → ${esc(d.ack_status)}${d.detail ? ` (${esc(d.detail)})` : ""}`
+        : "";
+    return `<tr>
+      <td class="mono muted">${ageSince(e.createdAt)}</td>
+      <td><span class="pill ${SEV[e.severity] ?? "idle"}">${esc(e.kind)}</span></td>
+      <td class="mono muted">${esc((e.nodeId ?? "—").slice(0, 8))}</td>
+      <td>${detail || '<span class="muted">—</span>'}</td>
+      <td class="mono muted">${e.traceId ? esc(e.traceId.slice(0, 8)) : "—"}</td>
+    </tr>`;
+  }).join("");
+}
+
+/* ---- Trace lookup ---- */
+el("tracego").addEventListener("click", async () => {
+  const id = el("traceid").value.trim();
+  const err = el("trace-err");
+  const out = el("tracechain");
+  err.textContent = ""; out.innerHTML = "";
+  if (!id) { err.textContent = "Paste a trace id first."; return; }
+
+  try {
+    const t = await api(`/ops/trace/${encodeURIComponent(id)}`);
+    if (!t.events.length && !t.commands.length) {
+      out.innerHTML = `<p class="muted" style="margin-top:14px">Nothing recorded under that id.</p>`;
+      return;
+    }
+    out.innerHTML = `
+      <div class="tablewrap" style="margin-top:14px">
+        <table>
+          <thead><tr><th>Step</th><th>What</th><th>Outcome</th><th>When</th></tr></thead>
+          <tbody>
+            ${t.events.map((e) => `<tr>
+              <td><span class="pill ${SEV[e.severity] ?? "idle"}">event</span></td>
+              <td>${esc(e.kind)}</td>
+              <td class="muted">${esc(e.details?.rule ?? e.details?.ack_status ?? "—")}</td>
+              <td class="mono muted">${ageSince(e.createdAt)} ago</td></tr>`).join("")}
+            ${t.commands.map((c) => `<tr>
+              <td><span class="pill ${c.ackStatus === "executed" ? "ok" : c.ackStatus ? "bad" : "wait"}">command</span></td>
+              <td>${esc(c.command?.type ?? "—")}</td>
+              <td class="muted">${esc(c.ackStatus ?? c.status)}${c.ackDetail ? ` — ${esc(c.ackDetail)}` : ""}</td>
+              <td class="mono muted">${ageSince(c.createdAt)} ago</td></tr>`).join("")}
+          </tbody>
+        </table>
+      </div>`;
+  } catch (ex) {
+    err.textContent = ex.message;
+  }
+});
+
+boot(() => refresh().catch((e) => console.error(e)), 5000);
+</script>
+</body>
+</html>

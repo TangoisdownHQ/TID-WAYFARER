@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    UPDATE fleet_assets\n                    SET dynamic_location = $1, updated_at = NOW(), last_seen = NOW()\n                    WHERE id = $2\n                    ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ee47b843a6da8325134599e4f7030326e79c832ff4c29c61a7a3c1918411df56"
+}

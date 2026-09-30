@@ -1,0 +1,51 @@
+# ───── Rust build artifacts ─────
+/target
+**/target/
+/debug/
+/release/
+/Cargo.lock         # optional: keep if you want reproducible builds
+*.rs.bk
+
+# ───── Binaries ─────
+*.exe
+*.dll
+*.so
+*.dylib
+*.rlib
+*.a
+*.o
+*.out
+*.pdb
+
+# ───── IDE / Editor ─────
+.idea/
+.vscode/
+*.swp
+*.swo
+*.swn
+*.swm
+
+# ───── Logs / Dumps ─────
+*.log
+*.tmp
+*.bak
+*~
+
+# ───── OS files ─────
+.DS_Store
+Thumbs.db
+
+# ───── Env / Secrets ─────
+.env
+.env.*
+!.env.example
+keys/
+ct.txt
+kem_pubkey.txt
+
+# ───── Git cleanup ─────
+.git-rewrite/
+
+
+# ───── Unused vendored crates (455MB, build uses crates.io sparse registry) ─────
+/vendor/

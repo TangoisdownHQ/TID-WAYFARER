@@ -1,0 +1,82 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT body_id, name, parent_id, body_class, frame,\n               radius_km, gravity_ms2, rotation_hr, ephemeris_src,\n               distance_pc, meta\n        FROM bodies\n        WHERE body_id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "body_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "parent_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "body_class",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "frame",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "radius_km",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 6,
+        "name": "gravity_ms2",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 7,
+        "name": "rotation_hr",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 8,
+        "name": "ephemeris_src",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "distance_pc",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 10,
+        "name": "meta",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "1b31332dd95795bf94992b937748bfb743308f7ca1a729e11251ba87f22bfa99"
+}

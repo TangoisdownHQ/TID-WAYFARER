@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO node_map (node_id, lat, lon, updated_at)\n        VALUES ($1, $2, $3, NOW())\n        ON CONFLICT (node_id)\n        DO UPDATE SET \n            lat        = EXCLUDED.lat,\n            lon        = EXCLUDED.lon,\n            updated_at = NOW()\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Float8",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "99903b82f15092d5329af40dce577e76000b4f5987d62c438716a482c685f90f"
+}

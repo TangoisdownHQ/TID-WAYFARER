@@ -1,0 +1,39 @@
+# =============================================================
+# 🪐  Off-world outpost — Mars (Jezero Crater)
+# No direct ingress. Earth↔Mars comms = light-delay DTN.
+# The DTN forwarder daemon in the API handles eventual sync.
+#
+# helm install outpost-jezero ./TIDasONE/deploy/helm/tid-wayfarer \
+#   -f examples/values-outpost-mars-jezero.yaml \
+#   -n tid-wayfarer-mars --create-namespace
+# =============================================================
+
+outpost:
+  name: tid-wayfarer-outpost-mars-jezero
+  role: outpost
+  bodyId: 499                # Mars (NAIF)
+  location:
+    lat: 18.4447
+    lon: 77.4508
+    alt: -2500               # m below Mars datum
+    region: "Mars-Jezero"
+
+replicaCount: 1
+
+# No coreApiUrl — initial registration happens via DTN bundle
+# rather than synchronous HTTP. Set only if you have a relay node
+# reachable over current Earth↔Mars windows.
+peers:
+  coreApiUrl: ""
+
+# No external ingress on a surface outpost — local comms only.
+ingress:
+  enabled: false
+
+secret:
+  jwt: REPLACE_WITH_STRONG_RANDOM
+  dbPassword: REPLACE_WITH_STRONG_RANDOM
+
+postgres:
+  enabled: true
+  storageSize: 100Gi         # offline-tolerant, store more locally

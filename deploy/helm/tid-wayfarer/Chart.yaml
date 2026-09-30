@@ -1,0 +1,19 @@
+apiVersion: v2
+name: tid-wayfarer
+description: |
+  TIDasONE outpost — Sovereign Cyber-Physical Command Fabric.
+  One Helm release == one outpost (Core HQ, terrestrial regional outpost,
+  or off-world surface outpost). Outposts sync via the mesh (DTN + node_registry).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - logistics
+  - mesh
+  - post-quantum
+  - cyber-physical
+  - multi-region
+  - tid-wayfarer
+home: https://tidhq.net
+maintainers:
+  - name: TIDasONE

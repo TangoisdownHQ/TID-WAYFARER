@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE fleet_telemetry SET processed = true WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "eedd6bd3d9f704f04cfbe5c43787ec312ba7d6045ea212a970801974d5ee0e44"
+}

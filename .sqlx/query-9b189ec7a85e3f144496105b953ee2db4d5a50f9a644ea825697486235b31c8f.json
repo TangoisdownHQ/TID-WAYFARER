@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE command_queue SET status='sent', sent_at = NOW() WHERE id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9b189ec7a85e3f144496105b953ee2db4d5a50f9a644ea825697486235b31c8f"
+}

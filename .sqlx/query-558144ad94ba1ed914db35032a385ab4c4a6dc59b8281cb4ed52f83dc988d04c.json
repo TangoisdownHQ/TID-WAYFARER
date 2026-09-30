@@ -1,0 +1,94 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE inventory\n        SET name = $2,\n            description = $3,\n            quantity = $4,\n            category = COALESCE($5, category),\n            unit = COALESCE($6, unit),\n            threshold = COALESCE($7, threshold)\n        WHERE id = $1\n        RETURNING id, owner_id, name, description, quantity,\n                  location, token_id, token_image_url,\n                  category, unit, threshold, created_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "owner_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "quantity",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "location",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "token_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "token_image_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "category",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "unit",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "threshold",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 11,
+        "name": "created_at",
+        "type_info": "Timestamp"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Int4",
+        "Text",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "558144ad94ba1ed914db35032a385ab4c4a6dc59b8281cb4ed52f83dc988d04c"
+}

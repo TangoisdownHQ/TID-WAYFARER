@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>TID Wayfarer — Fabric Console</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    :root {
+      --bg: #0a0e14; --panel: #131a24; --edge: #1f2a38;
+      --ink: #dbe4ee; --dim: #7d8ba0; --accent: #38bdf8;
+      --ok: #34d399; --warn: #fbbf24; --bad: #f87171;
+      --mono: ui-monospace, "SF Mono", Menlo, monospace;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--ink);
+      font-family: system-ui, sans-serif; }
+    header { display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 20px; background: var(--panel); border-bottom: 1px solid var(--edge); }
+    header h1 { font-size: 16px; margin: 0; letter-spacing: .5px; font-weight: 600; }
+    header .sub { color: var(--dim); font-size: 12px; font-family: var(--mono); }
+    nav a { color: var(--dim); text-decoration: none; margin-left: 16px; font-size: 13px; }
+    nav a:hover { color: var(--accent); }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 20px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; }
+    .card { background: var(--panel); border: 1px solid var(--edge); border-radius: 10px; padding: 16px; }
+    .card h3 { margin: 0 0 10px; font-size: 12px; text-transform: uppercase;
+      letter-spacing: 1px; color: var(--dim); font-weight: 600; }
+    .stat { display: flex; align-items: baseline; justify-content: space-between; padding: 3px 0; }
+    .stat .label { color: var(--dim); font-size: 13px; }
+    .stat .val { font-family: var(--mono); font-size: 18px; font-weight: 600; }
+    .val.ok { color: var(--ok); } .val.warn { color: var(--warn); } .val.bad { color: var(--bad); }
+    .big { font-size: 30px; font-family: var(--mono); font-weight: 700; }
+    #login { max-width: 340px; margin: 80px auto; background: var(--panel);
+      border: 1px solid var(--edge); border-radius: 12px; padding: 26px; }
+    #login h2 { margin: 0 0 4px; font-size: 18px; }
+    #login p { color: var(--dim); font-size: 13px; margin: 0 0 18px; }
+    input { width: 100%; padding: 10px 12px; margin: 6px 0; background: var(--bg);
+      border: 1px solid var(--edge); border-radius: 7px; color: var(--ink); font-size: 14px; }
+    button { width: 100%; padding: 10px; margin-top: 10px; background: var(--accent);
+      color: #04121c; border: 0; border-radius: 7px; font-weight: 700; cursor: pointer; font-size: 14px; }
+    button:hover { filter: brightness(1.08); }
+    .err { color: var(--bad); font-size: 13px; min-height: 18px; margin-top: 8px; }
+    .tokenrow { margin-top: 14px; font-size: 12px; color: var(--dim); }
+    .tokenrow a { color: var(--accent); cursor: pointer; }
+    #updated { color: var(--dim); font-size: 12px; font-family: var(--mono); }
+  </style>
+</head>
+<body>
+  <div id="login">
+    <h2>🛰️ Fabric Console</h2>
+    <p>Sign in to this outpost to view fabric status.</p>
+    <input id="email" type="email" placeholder="email" autocomplete="username" />
+    <input id="password" type="password" placeholder="password" autocomplete="current-password" />
+    <button onclick="doLogin()">Sign in</button>
+    <div class="err" id="login-err"></div>
+    <div class="tokenrow">Have a node/JWT token? <a onclick="useToken()">Paste it</a></div>
+  </div>
+
+  <div id="app" style="display:none">
+    <header>
+      <div>
+        <h1>🛰️ TID Wayfarer — Fabric Console</h1>
+        <div class="sub" id="outpost-line">—</div>
+      </div>
+      <nav>
+        <span id="updated">—</span>
+        <a href="/static/map.html">Map</a>
+        <a href="/static/console.html">Console</a>
+        <a href="/static/market.html">Supply</a>
+        <a onclick="logout()" style="cursor:pointer">Sign out</a>
+      </nav>
+    </header>
+    <div class="wrap">
+      <div class="grid">
+        <div class="card">
+          <h3>Outposts</h3>
+          <div class="big" id="nodes-online">—</div>
+          <div class="stat"><span class="label">Total</span><span class="val" id="nodes-total">—</span></div>
+          <div class="stat"><span class="label">Stale</span><span class="val warn" id="nodes-stale">—</span></div>
+          <div class="stat"><span class="label">Offline</span><span class="val bad" id="nodes-offline">—</span></div>
+        </div>
+        <div class="card">
+          <h3>Command Queue</h3>
+          <div class="stat"><span class="label">Queued</span><span class="val" id="cmd-queued">—</span></div>
+          <div class="stat"><span class="label">Sent</span><span class="val ok" id="cmd-sent">—</span></div>
+          <div class="stat"><span class="label">Failed</span><span class="val bad" id="cmd-failed">—</span></div>
+        </div>
+        <div class="card">
+          <h3>DTN Store &amp; Forward</h3>
+          <div class="stat"><span class="label">Outbox pending</span><span class="val" id="dtn-pending">—</span></div>
+          <div class="stat"><span class="label">Retrying</span><span class="val warn" id="dtn-retrying">—</span></div>
+          <div class="stat"><span class="label">Inbox total</span><span class="val" id="inbox-total">—</span></div>
+          <div class="stat"><span class="label">Unverified</span><span class="val bad" id="inbox-unverified">—</span></div>
+        </div>
+        <div class="card">
+          <h3>Autonomy</h3>
+          <div class="stat"><span class="label">Rules enabled</span><span class="val" id="rules-enabled">—</span></div>
+          <div class="stat"><span class="label">Events / hr</span><span class="val warn" id="events-hr">—</span></div>
+        </div>
+        <div class="card">
+          <h3>Fleet</h3>
+          <div class="stat"><span class="label">Assets</span><span class="val" id="fleet-assets">—</span></div>
+          <div class="stat"><span class="label">Telemetry / hr</span><span class="val ok" id="telemetry-hr">—</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const API = location.origin + "/api";
+    const TKEY = "tidw_token";
+    const token = () => localStorage.getItem(TKEY);
+
+    function authHeaders() {
+      const t = token();
+      if (!t) return {};
+      // JWTs have two dots; anything else is treated as a node token.
+      return (t.split(".").length === 3)
+        ? { Authorization: "Bearer " + t }
+        : { "X-Node-Token": t };
+    }
+
+    async function doLogin() {
+      const email = document.getElementById("email").value.trim();
+      const password = document.getElementById("password").value;
+      const err = document.getElementById("login-err");
+      err.textContent = "";
+      try {
+        const r = await fetch(API + "/local-auth/login", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password }),
+        });
+        if (!r.ok) { err.textContent = "Invalid credentials"; return; }
+        const data = await r.json();
+        localStorage.setItem(TKEY, data.token);
+        start();
+      } catch (e) { err.textContent = "Login failed: " + e.message; }
+    }
+
+    function useToken() {
+      const t = prompt("Paste a JWT or node shared secret:");
+      if (t) { localStorage.setItem(TKEY, t.trim()); start(); }
+    }
+
+    function logout() { localStorage.removeItem(TKEY); location.reload(); }
+
+    function cls(el, n, warnAt, badAt) {
+      el.classList.remove("ok", "warn", "bad");
+      if (badAt !== undefined && n >= badAt) el.classList.add("bad");
+      else if (warnAt !== undefined && n >= warnAt) el.classList.add("warn");
+    }
+
+    async function refresh() {
+      try {
+        const r = await fetch(API + "/fabric/status", { headers: authHeaders() });
+        if (r.status === 401) { logout(); return; }
+        const s = await r.json();
+        const set = (id, v) => document.getElementById(id).textContent = v;
+
+        document.getElementById("outpost-line").textContent =
+          `${s.outpost.name} · ${s.outpost.role} · ${s.outpost.nodeId}`;
+        set("nodes-online", s.nodes.online);
+        set("nodes-total", s.nodes.total);
+        set("nodes-stale", s.nodes.stale);
+        set("nodes-offline", s.nodes.offline);
+        set("cmd-queued", s.commandQueue.queued);
+        set("cmd-sent", s.commandQueue.sent);
+        set("cmd-failed", s.commandQueue.failed);
+        cls(document.getElementById("cmd-failed"), s.commandQueue.failed, 1, 1);
+        set("dtn-pending", s.dtnOutbox.pending);
+        set("dtn-retrying", s.dtnOutbox.retrying);
+        set("inbox-total", s.dtnInbox.total);
+        set("inbox-unverified", s.dtnInbox.unverified);
+        cls(document.getElementById("inbox-unverified"), s.dtnInbox.unverified, 1, 1);
+        set("rules-enabled", s.rules.enabled);
+        set("events-hr", s.rules.eventsLastHour);
+        set("fleet-assets", s.fleet.assets);
+        set("telemetry-hr", s.fleet.telemetryLastHour);
+        document.getElementById("updated").textContent =
+          "updated " + new Date().toLocaleTimeString();
+      } catch (e) {
+        document.getElementById("updated").textContent = "connection error";
+      }
+    }
+
+    let timer;
+    function start() {
+      document.getElementById("login").style.display = "none";
+      document.getElementById("app").style.display = "block";
+      refresh();
+      clearInterval(timer);
+      timer = setInterval(refresh, 5000);
+    }
+
+    if (token()) start();
+  </script>
+</body>
+</html>
