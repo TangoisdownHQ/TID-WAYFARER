@@ -33,6 +33,7 @@ use tid_wayfarer::routes::{
     lots::{lot_routes, inventory_lot_routes},
     capsules::capsule_routes,
     compliance::compliance_routes,
+    custody::custody_routes,
 };
 
 use tid_wayfarer::services::identity::load_or_generate_identity;
@@ -238,6 +239,7 @@ async fn main() -> Result<(), sqlx::Error> {
         .nest("/lots", lot_routes())
         .nest("/capsules", capsule_routes())
         .nest("/compliance", compliance_routes())
+        .nest("/custody", custody_routes())
         .nest("/fleet", fleet_asset_routes())
         .nest("/users", user_routes())
         .nest("/nodes", node_routes())

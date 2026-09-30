@@ -30,6 +30,7 @@ pub mod rollup;
 pub mod lots;
 pub mod capsules;
 pub mod compliance;
+pub mod custody;
 
 // Re-export route functions
 pub use auth::auth_routes;
@@ -60,3 +61,4 @@ pub use rollup::rollup_routes;
 pub use lots::{lot_routes, inventory_lot_routes};
 pub use capsules::capsule_routes;
 pub use compliance::compliance_routes;
+pub use custody::custody_routes;
