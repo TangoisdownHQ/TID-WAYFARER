@@ -29,6 +29,7 @@ pub mod request_trace;
 pub mod rollup;
 pub mod lots;
 pub mod capsules;
+pub mod compliance;
 
 // Re-export route functions
 pub use auth::auth_routes;
@@ -58,3 +59,4 @@ pub use supplylink::supplylink_routes;
 pub use rollup::rollup_routes;
 pub use lots::{lot_routes, inventory_lot_routes};
 pub use capsules::capsule_routes;
+pub use compliance::compliance_routes;

@@ -12,6 +12,11 @@
 # The defaults are safe for a throwaway local stack and unsafe for anything
 # reachable from outside your machine.
 
+# Pinned so the project name does not follow the directory. Compose derives it
+# from the folder otherwise, so moving this file renamed the project and the
+# fixed container_name values collided with the previous project's containers.
+name: tid-wayfarer
+
 services:
   # =======================
   # 🗄️  Shared Postgres DB
