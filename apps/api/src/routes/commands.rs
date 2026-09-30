@@ -1,62 +1,73 @@
-use axum::{
-    routing::{post, get},
-    Json, Router,
-    extract::{State, Query},
-    http::StatusCode,
-};
-use serde::{Serialize, Deserialize};
-use uuid::Uuid;
-use chrono::Utc;
-use std::collections::HashMap;
+//! Command receiver — the executing end of core's push-based command engine.
+//!
+//! There used to be a second, parallel command system here: `/enqueue`,
+//! `/pull` and `/ack` over a `commands` table. Nothing executed from it. The
+//! command engine, the actuators, the dashboard, the fabric status endpoint,
+//! the metrics and the rules engine all use `command_queue`, so `/enqueue`
+//! wrote a row that would never run and answered 200 — a silent black hole for
+//! any operator who called it.
+//!
+//! It was also unauthorised in a way that mattered: `/pull` took the target
+//! node from a query string and marked those commands `sent`, so any
+//! authenticated caller could drain and blackhole another outpost's queue,
+//! and `/ack` took the node from the body and wrote receipts in its name.
+//! Deleting the dead path removed three confused-deputy holes outright.
+//!
+//! What remains is `/execute`: core POSTs a command here, the actuator runs,
+//! and the response body *is* the ack — no callback and no second
+//! authenticated hop.
 
+use axum::{
+    extract::State,
+    http::StatusCode,
+    routing::post,
+    Json, Router,
+};
+use uuid::Uuid;
+
+use crate::routes::auth_middleware::{Caller, Principal};
 use crate::services::actuators;
 use crate::AppState;
 
-#[derive(Deserialize)]
-pub struct EnqueueCommand {
-    pub target_node: Uuid,
-    pub asset_id: Option<Uuid>,
-    pub cmd_type: String,
-    pub payload: serde_json::Value,
-}
-
-#[derive(Serialize)]
-pub struct CommandQueued { 
-    pub id: Uuid, 
-    pub created_at: String 
-}
-
-#[derive(Deserialize)]
-pub struct AckCommand {
-    pub command_id: Uuid,
-    pub node_id: Uuid,
-    pub status: String, // acked | failed
-    pub info: Option<serde_json::Value>
-}
-
-#[derive(Serialize)]
-pub struct AckSaved { 
-    pub id: Uuid, 
-    pub created_at: String 
-}
-
 pub fn command_routes() -> Router<AppState> {
-    Router::new()
-        .route("/enqueue", post(enqueue))
-        .route("/pull", get(pull_for_node))
-        .route("/ack", post(ack))
-        .route("/execute", post(execute))
+    Router::new().route("/execute", post(execute))
 }
 
-// ✅ POST /api/commands/execute — receiving side of the core's push-based
-// command engine (it POSTs to {api_endpoint}/commands/execute). Dispatches to
-// the actuator registry and reports the outcome in the response body, which
-// is what core records as the ack: the request/response pair *is* the ack
-// channel, so no callback (and no second authenticated hop) is needed.
+/// POST /api/commands/execute
+///
+/// Authority, not merely membership. A command actuates physical state —
+/// LOCKDOWN refuses every mutating request on this outpost, ISOLATE_NETWORK
+/// cuts it off — so being *some* authenticated party is not enough. Previously
+/// any role-`user` JWT could lock down an outpost, and worse, could UNLOCK one
+/// that autonomy had locked in response to physical tamper: the defence was
+/// undone by any credential the tampering party might hold.
+///
+/// Accepted from a peer node that signed its request (core pushing a command),
+/// or an admin user (manual intervention). Everyone else gets 403.
+///
+/// This is still transport-level authority: it proves who *delivered* the
+/// command, not who *issued* it. A command that has travelled through a relay
+/// or sat in a queue for days cannot be validated this way — that needs the
+/// command envelope itself to be signed by its issuer, which is the same shape
+/// as the vouchers in `Documentation/OfflineSettlement.md`.
 pub async fn execute(
     State(state): State<AppState>,
+    Caller(principal): Caller,
     Json(command): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let authorised = matches!(principal, Principal::Node(_)) || principal.is_admin();
+    if !authorised {
+        tracing::warn!(
+            caller = %principal.describe(),
+            command_type = command.get("type").and_then(|v| v.as_str()).unwrap_or("unknown"),
+            "refused command: caller may not actuate this outpost"
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            "commands may only be pushed by a fabric node or an admin".to_string(),
+        ));
+    }
+
     // The pushing core folds its trace_id into the command envelope, so the
     // executing outpost records the same id — one query then spans both sides
     // of the push, from the telemetry row that caused it to the execution.
@@ -93,11 +104,16 @@ pub async fn execute(
         "command": command,
         "ack_status": outcome.status(),
         "detail": outcome.detail(),
+        // Who actuated this outpost, recorded alongside what happened.
+        "issued_by": principal.describe(),
     }))
     .bind(trace_id)
     .execute(&state.db)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| {
+        tracing::error!(error = %e, "could not record command execution");
+        (StatusCode::INTERNAL_SERVER_ERROR, "could not record execution".to_string())
+    })?;
 
     // Render Option fields as bare values: `?opt` would emit Some(..)/None,
     // which is noise in a log query.
@@ -107,6 +123,7 @@ pub async fn execute(
         command_type,
         ack_status = outcome.status(),
         detail = outcome.detail(),
+        issued_by = %principal.describe(),
         "command executed"
     );
 
@@ -117,110 +134,3 @@ pub async fn execute(
         "detail": outcome.detail(),
     })))
 }
-
-// ✅ POST /api/commands/enqueue
-pub async fn enqueue(
-    State(state): State<AppState>, 
-    Json(input): Json<EnqueueCommand>
-) -> Result<Json<CommandQueued>, StatusCode> {
-
-    let id = Uuid::new_v4();
-
-    sqlx::query!(
-        r#"
-        INSERT INTO commands (id, target_node, asset_id, cmd_type, payload)
-        VALUES ($1, $2, $3, $4, $5)
-        "#,
-        id, input.target_node, input.asset_id, input.cmd_type, input.payload
-    )
-    .execute(&state.db)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(CommandQueued { id, created_at: Utc::now().to_rfc3339() }))
-}
-
-// ✅ GET /api/commands/pull?node_id=<uuid>
-pub async fn pull_for_node(
-    State(state): State<AppState>, 
-    Query(q): Query<HashMap<String, String>>
-) -> Result<Json<Vec<serde_json::Value>>, StatusCode> {
-
-    let node_id = q
-        .get("node_id")
-        .and_then(|v| Uuid::parse_str(v).ok())
-        .ok_or(StatusCode::BAD_REQUEST)?;
-
-    let rows = sqlx::query!(
-        r#"
-        SELECT id::text, asset_id::text as "asset_id?", cmd_type, payload, created_at
-        FROM commands
-        WHERE target_node = $1 AND status = 'queued'
-        ORDER BY created_at ASC
-        LIMIT 20
-        "#,
-        node_id
-    )
-    .fetch_all(&state.db)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // ✅ fixed: handle Option<String> for id correctly
-    let ids: Vec<Uuid> = rows.iter()
-        .filter_map(|r| r.id.as_ref().and_then(|id| Uuid::parse_str(id).ok()))
-        .collect();
-
-    if !ids.is_empty() {
-        let _ = sqlx::query!(
-            r#"UPDATE commands SET status = 'sent' WHERE id = ANY($1)"#,
-            &ids[..]
-        )
-        .execute(&state.db)
-        .await;
-    }
-
-    // ✅ fixed: handle Option<JsonValue> properly
-    let payload = rows.into_iter().map(|r| {
-        serde_json::json!({
-            "id": r.id,
-            "asset_id": r.asset_id,
-            "cmd_type": r.cmd_type,
-            "payload": if r.payload.is_null() { serde_json::json!({}) } else { r.payload.clone() },
-            "created_at": r.created_at.to_rfc3339()
-        })
-    }).collect();
-
-    Ok(Json(payload))
-}
-
-// ✅ POST /api/commands/ack
-pub async fn ack(
-    State(state): State<AppState>, 
-    Json(a): Json<AckCommand>
-) -> Result<Json<AckSaved>, StatusCode> {
-
-    let id = Uuid::new_v4();
-
-    sqlx::query!(
-        r#"UPDATE commands SET status = $2 WHERE id = $1"#,
-        a.command_id,
-        a.status
-    )
-    .execute(&state.db)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    sqlx::query!(
-        r#"
-        INSERT INTO command_receipts (id, command_id, node_id, status, info)
-        VALUES ($1, $2, $3, $4, $5)
-        "#,
-        id, a.command_id, a.node_id, a.status, a.info.unwrap_or_else(|| serde_json::json!({}))
-    )
-    .execute(&state.db)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(AckSaved { id, created_at: Utc::now().to_rfc3339() }))
-}
-

@@ -27,6 +27,83 @@ pub struct Claims {
     pub role: String,    // "user" or "admin"
 }
 
+/// Who the guard actually authenticated.
+///
+/// `require_auth` used to verify a node signature or a JWT and then drop the
+/// identity on the floor — `extensions.insert` appeared nowhere in the crate.
+/// Membership was proven; *identity* never reached a handler. So anything
+/// needing an actor read it from the request body, and the fabric had no way
+/// to tell one member from another: any authenticated caller could pull
+/// another node's commands, acknowledge them on its behalf, post telemetry as
+/// any node, or push a LOCKDOWN.
+///
+/// The guard now stores this in request extensions, and [`Caller`] reads it
+/// back out. A handler that needs to know who is calling must take it from
+/// here, never from the payload.
+#[derive(Debug, Clone)]
+pub enum Principal {
+    /// A peer outpost that proved possession of its registered Ed25519 key.
+    Node(Uuid),
+    /// A human bearing a valid JWT.
+    User(Claims),
+    /// The legacy fabric-wide shared secret. It authenticates *membership* and
+    /// nothing else — every holder looks identical — so it can never satisfy
+    /// "is the caller this specific node". Kept only for bootstrap and
+    /// rollback; see `FABRIC_AUTH`.
+    SharedSecret,
+}
+
+impl Principal {
+    /// The node id this caller may act as, if any.
+    pub fn node_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Node(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    pub fn is_admin(&self) -> bool {
+        matches!(self, Self::User(c) if c.role == "admin")
+    }
+
+    /// Short label for logs and audit rows.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Node(id) => format!("node:{id}"),
+            Self::User(c) => format!("user:{}", c.sub),
+            Self::SharedSecret => "shared-secret".to_string(),
+        }
+    }
+}
+
+/// Extractor for the verified caller. Infallible where the route sits behind
+/// `require_auth`; a missing principal means the route was mounted outside the
+/// guard, which is a wiring bug rather than a client error.
+pub struct Caller(pub Principal);
+
+#[async_trait]
+impl<S: Send + Sync> FromRequestParts<S> for Caller {
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<Principal>()
+            .cloned()
+            .map(Caller)
+            .ok_or_else(|| {
+                tracing::error!(
+                    path = %parts.uri.path(),
+                    "no Principal in extensions — route is mounted outside require_auth"
+                );
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "caller identity unavailable".to_string(),
+                )
+            })
+    }
+}
+
 /// Extractor that validates JWT and injects claims into the handler
 pub struct AuthenticatedUser(pub Claims);
 
@@ -87,17 +164,21 @@ pub async fn require_auth(
     // through rather than reject: rolling clients send the signature *and*
     // the legacy token together, and the token is what this mode honours.
     if mode.allows_signature() && req.headers().contains_key(fabric_auth::HEADER_SIGNATURE) {
-        let (parts, body) = req.into_parts();
+        let (mut parts, body) = req.into_parts();
         let bytes = axum::body::to_bytes(body, fabric_auth::MAX_SIGNED_BODY_BYTES)
             .await
             .map_err(|_| (StatusCode::PAYLOAD_TOO_LARGE, "Body too large to verify".to_string()))?;
 
-        verify_signed_request(&state, &parts, &bytes).await.map_err(|e| {
+        let node_id = verify_signed_request(&state, &parts, &bytes).await.map_err(|e| {
             incr(&METRICS.fabric_sig_rejected);
             tracing::warn!(path = %parts.uri.path(), reason = %e, "fabric signature rejected");
             (StatusCode::UNAUTHORIZED, "Invalid node signature".to_string())
         })?;
         incr(&METRICS.fabric_sig_ok);
+
+        // The whole point of verifying: downstream must be able to ask *which*
+        // node this is, not merely that it is one.
+        parts.extensions.insert(Principal::Node(node_id));
 
         return Ok(next.run(Request::from_parts(parts, Body::from(bytes))).await);
     }
@@ -119,6 +200,11 @@ pub async fn require_auth(
         }
         return match std::env::var("NODE_SHARED_SECRET") {
             Ok(secret) if !secret.is_empty() && constant_time_eq(token.as_bytes(), secret.as_bytes()) => {
+                // Deliberately NOT Principal::Node: every holder of this secret
+                // is indistinguishable, so it cannot answer "which node is
+                // this". Handlers needing a specific identity will refuse it.
+                let mut req = req;
+                req.extensions_mut().insert(Principal::SharedSecret);
                 Ok(next.run(req).await)
             }
             _ => Err((StatusCode::UNAUTHORIZED, "Invalid node token".to_string())),
@@ -127,7 +213,8 @@ pub async fn require_auth(
 
     // ---- 3. User JWT ----
     let (mut parts, body) = req.into_parts();
-    AuthenticatedUser::from_request_parts(&mut parts, &state).await?;
+    let AuthenticatedUser(claims) = AuthenticatedUser::from_request_parts(&mut parts, &state).await?;
+    parts.extensions.insert(Principal::User(claims));
     Ok(next.run(Request::from_parts(parts, body)).await)
 }
 
@@ -175,7 +262,7 @@ async fn verify_signed_request(
     state: &AppState,
     parts: &Parts,
     body: &[u8],
-) -> Result<(), SigError> {
+) -> Result<Uuid, SigError> {
     let header = |name: &str| parts.headers.get(name).and_then(|v| v.to_str().ok());
 
     let (Some(node_id), Some(ts_raw), Some(signature)) = (
@@ -219,9 +306,66 @@ async fn verify_signed_request(
     let message = fabric_auth::canonical_request(parts.method.as_str(), &path, ts, body);
 
     if verify_signature(&public_key, message.as_bytes(), signature) {
-        Ok(())
+        Ok(node_uuid)
     } else {
         Err(SigError::BadSignature)
+    }
+}
+
+#[cfg(test)]
+mod principal_tests {
+    use super::*;
+
+    fn claims(role: &str) -> Claims {
+        Claims {
+            sub: "11111111-1111-1111-1111-111111111111".into(),
+            exp: 0,
+            provider: "local".into(),
+            role: role.into(),
+        }
+    }
+
+    #[test]
+    fn only_a_signing_node_can_act_as_a_node() {
+        let id = Uuid::nil();
+        assert_eq!(Principal::Node(id).node_id(), Some(id));
+        // A user is a person, not an outpost.
+        assert_eq!(Principal::User(claims("admin")).node_id(), None);
+        // The decisive one: the shared secret authenticates membership only.
+        // Every holder is identical, so it can never answer "which node".
+        // Treating it as a node id is exactly how one compromised outpost
+        // would have impersonated the whole fabric.
+        assert_eq!(Principal::SharedSecret.node_id(), None);
+    }
+
+    #[test]
+    fn admin_is_a_user_role_not_a_fabric_property() {
+        assert!(Principal::User(claims("admin")).is_admin());
+        assert!(!Principal::User(claims("user")).is_admin());
+        assert!(!Principal::Node(Uuid::nil()).is_admin());
+        assert!(!Principal::SharedSecret.is_admin());
+    }
+
+    #[test]
+    fn command_execution_accepts_only_nodes_and_admins() {
+        // Mirrors routes::commands::execute. A plain user must not be able to
+        // LOCKDOWN an outpost — or UNLOCK one that autonomy locked after
+        // physical tamper, which was the sharper half of the hole.
+        let may_actuate =
+            |p: &Principal| matches!(p, Principal::Node(_)) || p.is_admin();
+
+        assert!(may_actuate(&Principal::Node(Uuid::nil())));
+        assert!(may_actuate(&Principal::User(claims("admin"))));
+        assert!(!may_actuate(&Principal::User(claims("user"))));
+        assert!(!may_actuate(&Principal::SharedSecret));
+    }
+
+    #[test]
+    fn describe_identifies_the_caller_for_audit() {
+        let id = Uuid::nil();
+        assert_eq!(Principal::Node(id).describe(), format!("node:{id}"));
+        assert!(Principal::User(claims("user")).describe().starts_with("user:"));
+        assert_eq!(Principal::SharedSecret.describe(), "shared-secret");
     }
 }
 

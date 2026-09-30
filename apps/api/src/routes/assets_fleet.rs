@@ -10,6 +10,7 @@ use serde::{Serialize, Deserialize};
 use uuid::Uuid;
 use chrono::{Utc, DateTime};
 use crate::AppState;
+use crate::routes::auth_middleware::{Caller, Principal};
 use crate::services::signed_telemetry::verify_hmac;
 use crate::services::metrics::{incr, METRICS};
 
@@ -106,13 +107,26 @@ pub async fn register_fleet_asset(
     }))
 }
 
-/// Ingest telemetry. Content integrity is enforced per-node: if the sending
-/// node has a `hmac_secret` in the registry, the request must carry a valid
-/// `X-Telemetry-HMAC: <hex>` over the raw body (HMAC-SHA256). Nodes without a
-/// secret are accepted unsigned (bootstrap), which the fabric guard still
-/// gates. Takes the raw body so the HMAC covers exactly what the client sent.
+/// Ingest telemetry.
+///
+/// Attribution comes from the authenticated caller, not the payload, and
+/// content integrity is enforced per-node: a node with a `hmac_secret` on file
+/// must send a valid `X-Telemetry-HMAC: <hex>` over the raw body
+/// (HMAC-SHA256). The raw body is taken so the HMAC covers exactly what the
+/// client sent.
+///
+/// Who may report as whom:
+///   - a signing node    — only as itself; a mismatched `node_id` is a 403
+///   - a user JWT        — on a node's behalf, but the node's HMAC must hold
+///   - the shared secret — never; it cannot distinguish one holder from another
+///
+/// Unsigned telemetry is accepted only from a node that authenticated by
+/// signature and has no secret issued yet. Since telemetry drives autonomy
+/// (tamper → lockdown, malware → isolation), a caller that cannot prove which
+/// node it is must not be able to move another outpost's state.
 pub async fn ingest_telemetry(
     State(state): State<AppState>,
+    Caller(principal): Caller,
     headers: HeaderMap,
     body: Bytes,
 ) -> StatusCode {
@@ -121,26 +135,83 @@ pub async fn ingest_telemetry(
         Err(_) => return StatusCode::BAD_REQUEST,
     };
 
-    // Look up this node's telemetry secret (node_id is TEXT-compared so a
-    // human name or UUID both work).
+    // Whose telemetry this is, decided by the guard rather than the payload.
+    //
+    // This used to read `t.node_id` from the body and look up *that* node's
+    // secret — so the HMAC gate was bypassed by naming any node without a
+    // secret, or one that didn't exist at all (no row → no secret → accepted
+    // unsigned). Telemetry drives autonomy, so that was a path to forcing
+    // another outpost into LOCKDOWN or network isolation.
+    let claimed = t.node_id.trim();
+    match &principal {
+        Principal::Node(id) => {
+            // A signing node may only report as itself.
+            if !claimed.is_empty() && claimed != id.to_string() {
+                incr(&METRICS.telemetry_hmac_rejected);
+                tracing::warn!(
+                    signed_as = %id, claimed = %claimed,
+                    "telemetry rejected: node reported as a different node"
+                );
+                return StatusCode::FORBIDDEN;
+            }
+        }
+        // An operator may submit on a node's behalf (bench tests, backfill),
+        // but the HMAC below still has to hold for the named node.
+        Principal::User(_) => {}
+        // Indistinguishable from every other holder, so it cannot vouch for a
+        // node id. Sign the request instead.
+        Principal::SharedSecret => {
+            incr(&METRICS.telemetry_hmac_rejected);
+            tracing::warn!(claimed = %claimed, "telemetry rejected: shared secret cannot assert a node id");
+            return StatusCode::FORBIDDEN;
+        }
+    }
+
+    // A signing node's own id wins; otherwise fall back to what was claimed.
+    let node_id = principal
+        .node_id()
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| claimed.to_string());
+
+    if node_id.is_empty() {
+        return StatusCode::BAD_REQUEST;
+    }
+
+    // Content integrity for the node the telemetry is attributed to.
     let node_secret: Option<String> = sqlx::query_scalar(
         "SELECT hmac_secret FROM node_registry WHERE node_id::text = $1",
     )
-    .bind(&t.node_id)
+    .bind(&node_id)
     .fetch_optional(&state.db)
     .await
     .ok()
     .flatten();
 
-    if let Some(secret) = node_secret {
-        let provided = headers
-            .get("x-telemetry-hmac")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if provided.is_empty() || !verify_hmac(&body, provided, &secret) {
-            incr(&METRICS.telemetry_hmac_rejected);
-            tracing::warn!(node_id = %t.node_id, "telemetry HMAC rejected");
-            return StatusCode::UNAUTHORIZED;
+    match node_secret {
+        Some(secret) => {
+            let provided = headers
+                .get("x-telemetry-hmac")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            if provided.is_empty() || !verify_hmac(&body, provided, &secret) {
+                incr(&METRICS.telemetry_hmac_rejected);
+                tracing::warn!(node_id = %node_id, "telemetry HMAC rejected");
+                return StatusCode::UNAUTHORIZED;
+            }
+        }
+        // No secret on file. Tolerated only for a node that authenticated as
+        // itself by signature — its identity is already proven, and this is
+        // the bootstrap window before a secret is issued. A user submitting on
+        // behalf of a node with no secret has proven nothing about the source.
+        None => {
+            if principal.node_id().is_none() {
+                incr(&METRICS.telemetry_hmac_rejected);
+                tracing::warn!(
+                    node_id = %node_id,
+                    "telemetry rejected: no telemetry secret on file for the named node"
+                );
+                return StatusCode::UNAUTHORIZED;
+            }
         }
     }
 
@@ -162,7 +233,7 @@ pub async fn ingest_telemetry(
         )
         "#,
     )
-    .bind(t.asset_id).bind(&t.node_id).bind(t.timestamp)
+    .bind(t.asset_id).bind(&node_id).bind(t.timestamp)
     .bind(t.lat).bind(t.lon).bind(t.alt)
     .bind(t.speed).bind(t.heading)
     .bind(t.inclination).bind(t.apogee).bind(t.perigee)
