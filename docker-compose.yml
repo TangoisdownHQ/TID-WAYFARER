@@ -94,20 +94,18 @@ services:
   # ==========================
   # 🛰️  Outpost B API
   # ==========================
+  # Reuses the image built for core rather than a second source tree. Outpost B
+  # used to build from ../TIDasONE-B, a 3.6 GB drifting copy of this repo, which
+  # quietly contradicted the product's own premise: every outpost runs the
+  # *identical* core and differs only by configuration. Same image, different
+  # env — that is the whole point.
   tidasone-b-api:
-    build:
-      context: ../TIDasONE-B
-      dockerfile: dockerfile
-    container_name: tidasone-b-api
-    restart: unless-stopped
-
+    image: tid-wayfarer:latest
     depends_on:
       tid-wayfarer-core:
         condition: service_healthy
-
-    # 🔥 Pulls env values from ../TIDasONE-B/.env
-    env_file:
-      - ../TIDasONE-B/.env
+    container_name: tidasone-b-api
+    restart: unless-stopped
 
     environment:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-devpassword}@tidasone-db-v2:5432/tidasone
