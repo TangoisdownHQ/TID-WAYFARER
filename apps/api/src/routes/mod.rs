@@ -27,6 +27,7 @@ pub mod dtn;
 pub mod fabric;
 pub mod request_trace;
 pub mod rollup;
+pub mod lots;
 
 // Re-export route functions
 pub use auth::auth_routes;
@@ -54,3 +55,4 @@ pub use dtn::dtn_routes;
 pub use fabric::fabric_routes;
 pub use supplylink::supplylink_routes;
 pub use rollup::rollup_routes;
+pub use lots::{lot_routes, inventory_lot_routes};

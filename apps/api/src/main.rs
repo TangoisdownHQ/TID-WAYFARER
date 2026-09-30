@@ -30,6 +30,7 @@ use tid_wayfarer::routes::{
     fabric::fabric_routes,
     supplylink::supplylink_routes,
     rollup::rollup_routes,
+    lots::{lot_routes, inventory_lot_routes},
 };
 
 use tid_wayfarer::services::identity::load_or_generate_identity;
@@ -223,7 +224,7 @@ async fn main() -> Result<(), sqlx::Error> {
     // AuthenticatedUser/AdminUser keep enforcing user JWTs on top of this.
     let guarded_routes = Router::new()
         .nest("/commsec", commsec_routes())
-        .nest("/inventory", inventory_routes())
+        .nest("/inventory", inventory_routes().merge(inventory_lot_routes()))
         .nest("/me", me_routes())
         .nest("/packages", package_routes())
         .nest("/assets", asset_routes().merge(asset_extras_routes()))
@@ -232,6 +233,7 @@ async fn main() -> Result<(), sqlx::Error> {
         .nest("/fulfillments", fulfillment_routes())
         .nest("/supplylink", supplylink_routes())
         .nest("/rollup", rollup_routes())
+        .nest("/lots", lot_routes())
         .nest("/fleet", fleet_asset_routes())
         .nest("/users", user_routes())
         .nest("/nodes", node_routes())
