@@ -16,6 +16,23 @@
   tr.item:hover td { background: var(--panel-2); }
   .caret { display: inline-block; width: 11px; color: var(--dim); font-family: var(--mono); }
   .partial { color: var(--unknown); font-family: var(--mono); font-size: 11px; }
+  .short { color: var(--dark); font-family: var(--mono); font-size: 11px; }
+  button.reorder { color: var(--signal); font-size: 12px; white-space: nowrap; }
+
+  dialog {
+    border: 1px solid var(--edge-lit); border-radius: var(--r);
+    background: var(--panel); color: var(--ink); padding: 0; max-width: 460px; width: 92%;
+  }
+  dialog::backdrop { background: rgba(3, 6, 10, 0.72); }
+  dialog .body { padding: 20px 22px 22px; }
+  dialog h3 { margin: 0 0 4px; font-size: 16px; }
+  .recap {
+    background: var(--panel-2); border: 1px solid var(--edge); border-radius: 8px;
+    padding: 11px 13px; margin: 14px 0; font-size: 13px; line-height: 1.7;
+  }
+  .recap .k { color: var(--dim); display: inline-block; min-width: 82px; }
+  .recap .v { font-family: var(--mono); font-size: 12.5px; color: var(--ink); }
+  .actions { display: flex; gap: 9px; margin-top: 4px; }
 </style>
 </head>
 <body>
@@ -31,6 +48,9 @@
     <button type="submit">Sign in</button>
     <div class="err" id="login-err"></div>
   </form>
+    <p class="muted" style="font-size:13px;margin-top:14px">
+      No account? <a href="/static/signup.html">Create one</a>.
+    </p>
 </div>
 
 <div id="app" style="display:none">
@@ -104,6 +124,45 @@
   </div>
 </div>
 
+<!-- Reorder. The rollup knows what is short and where; this turns that into an
+     order on the marketplace without retyping any of it. -->
+<dialog id="reorder">
+  <div class="body">
+    <h3 id="ro-title">Reorder</h3>
+    <p class="muted" style="margin:0;font-size:13px">
+      This posts an order to the marketplace. Outposts bid to carry it; you pick one.
+    </p>
+
+    <div class="recap" id="ro-recap"></div>
+
+    <form id="ro-form">
+      <div class="grid" style="grid-template-columns:1fr 1fr;gap:12px">
+        <label class="field"><span class="label">Quantity</span>
+          <input id="ro-qty" type="number" step="any" min="0" required /></label>
+        <label class="field"><span class="label">Price ceiling (TIDAT)</span>
+          <input id="ro-max" type="number" step="any" placeholder="optional" /></label>
+      </div>
+      <label class="field"><span class="label">Needed by</span>
+        <input id="ro-by" type="date" /></label>
+      <label class="field"><span class="label">Description</span>
+        <input id="ro-desc" required /></label>
+      <div class="err" id="ro-err"></div>
+      <div class="actions">
+        <button type="submit" id="ro-submit">Post order</button>
+        <button type="button" class="linkish" id="ro-cancel" style="color:var(--dim)">Cancel</button>
+      </div>
+    </form>
+
+    <div id="ro-done" style="display:none">
+      <p style="color:var(--live);margin:14px 0 6px">Order posted.</p>
+      <p class="muted" style="font-size:13px;margin:0">
+        Track bids on the <a href="/static/market.html">Supply</a> page.
+      </p>
+      <div class="actions"><button type="button" id="ro-close">Close</button></div>
+    </div>
+  </div>
+</dialog>
+
 <script type="module">
 import { api, el, esc, age, ageSince, setText, boot } from "/static/js/wayfarer.js";
 
@@ -164,16 +223,21 @@ async function refresh() {
       if (open) {
         rows.push(...it.by_location
           .slice()
-          .sort((a, b) => a.quantity - b.quantity)
-          .map((l) => `
+          .sort((a, b) => b.shortfall - a.shortfall || a.quantity - b.quantity)
+          .map((l, li) => `
             <tr class="breakdown">
               <td></td>
               <td class="loc">${esc(l.outpost_name)}</td>
               <td class="loc">${esc(l.location ?? "—")}</td>
-              <td class="num">${esc(l.quantity)}</td>
+              <td class="num">${esc(l.quantity)}${
+                l.shortfall > 0 ? ` <span class="short">−${esc(l.shortfall)}</span>` : ""}</td>
               <td class="loc">${esc(it.unit)}</td>
               <td></td>
-              <td>${l.below_threshold ? `<span class="pill bad">low here</span>` : ""}</td>
+              <td>${l.below_threshold
+                ? `<button class="linkish reorder" data-i="${i}" data-l="${li}"
+                     title="Draft an order for ${esc(l.shortfall)} ${esc(it.unit)} to ${esc(l.outpost_name)}"
+                   >Reorder ${esc(l.shortfall)}</button>`
+                : ""}</td>
             </tr>`));
       }
       return rows.join("");
@@ -184,6 +248,15 @@ async function refresh() {
         const k = tr.dataset.key;
         expanded.has(k) ? expanded.delete(k) : expanded.add(k);
         refresh().catch((e) => console.error(e));
+      }));
+
+    // Reorder lives on the location row, not the item row: you restock a
+    // place, not a fabric-wide abstraction.
+    body.querySelectorAll("button.reorder").forEach((b) =>
+      b.addEventListener("click", (ev) => {
+        ev.stopPropagation();           // don't collapse the row underneath
+        const it = r.items[Number(b.dataset.i)];
+        openReorder(it, it.by_location[Number(b.dataset.l)]);
       }));
   }
 
@@ -198,6 +271,76 @@ async function refresh() {
       <td class="loc">${s.error ? esc(s.error) : ""}</td>
     </tr>`).join("");
 }
+
+/* ---- Reorder --------------------------------------------------------------
+ * The gap is per location, never fabric-wide: restocking is something you do
+ * to a place. `shortfall` is what brings that site back to its own reorder
+ * point, which is the only quantity that means anything to order. */
+
+let pending = null;
+
+function openReorder(item, loc) {
+  pending = { item, loc };
+  const where = loc.location ? `${loc.outpost_name} · ${loc.location}` : loc.outpost_name;
+
+  el("ro-title").textContent = `Reorder ${item.name}`;
+  el("ro-recap").innerHTML = `
+    <div><span class="k">Destination</span> <span class="v">${esc(where)}</span></div>
+    <div><span class="k">On hand</span> <span class="v">${esc(loc.quantity)} ${esc(item.unit)}</span></div>
+    <div><span class="k">Reorder at</span> <span class="v">${esc(loc.threshold)} ${esc(item.unit)}</span></div>
+    <div><span class="k">Short by</span> <span class="v" style="color:var(--dark)">${esc(loc.shortfall)} ${esc(item.unit)}</span></div>`;
+
+  el("ro-qty").value = loc.shortfall;
+  el("ro-max").value = "";
+  el("ro-by").value = "";
+  el("ro-desc").value = `Restock ${item.name} at ${where}`;
+  el("ro-err").textContent = "";
+  el("ro-form").style.display = "";
+  el("ro-done").style.display = "none";
+  el("reorder").showModal();
+}
+
+el("ro-cancel").addEventListener("click", () => el("reorder").close());
+el("ro-close").addEventListener("click", () => {
+  el("reorder").close();
+  refresh().catch((e) => console.error(e));
+});
+
+el("ro-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!pending) return;
+  const err = el("ro-err"); err.textContent = "";
+  const btn = el("ro-submit"); btn.disabled = true;
+
+  const { item, loc } = pending;
+  const by = el("ro-by").value;
+  try {
+    await api("/orders", {
+      method: "POST",
+      body: JSON.stringify({
+        description: el("ro-desc").value,
+        item_kind: "inventory",
+        quantity: Number(el("ro-qty").value),
+        unit: item.unit,
+        max_price: el("ro-max").value ? Number(el("ro-max").value) : null,
+        // Sent as an instant so it matches the DateTime<Utc> the API expects.
+        needed_by: by ? new Date(`${by}T00:00:00Z`).toISOString() : null,
+        delivery_address: loc.location
+          ? `${loc.outpost_name} · ${loc.location}` : loc.outpost_name,
+        // Which outpost actually needs it — the whole point of ordering
+        // against a location rather than a fabric-wide total.
+        requester_outpost: loc.node_id,
+        target_meta: { source: "rollup-reorder", resource: item.name, on_hand: loc.quantity },
+      }),
+    });
+    el("ro-form").style.display = "none";
+    el("ro-done").style.display = "";
+  } catch (ex) {
+    err.textContent = ex.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 boot(() => refresh().catch((e) => console.error(e)), 15000);
 </script>

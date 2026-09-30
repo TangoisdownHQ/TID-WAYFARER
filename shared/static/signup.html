@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Wayfarer — Create an account</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="/static/css/wayfarer.css" />
+<style>
+  .kinds { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .kind {
+    border: 1px solid var(--edge); border-radius: var(--r); padding: 12px 13px;
+    cursor: pointer; background: var(--panel); text-align: left;
+  }
+  .kind:hover { border-color: var(--edge-lit); }
+  .kind[aria-pressed="true"] { border-color: var(--signal); background: var(--panel-2); }
+  .kind .name { display: block; font-weight: 600; color: var(--ink); margin-bottom: 3px; }
+  .kind .what { display: block; font-size: 12px; color: var(--dim); line-height: 1.45; }
+  .step { display: none; }
+  .step.on { display: block; }
+  .ok { color: var(--live); }
+</style>
+</head>
+<body>
+
+<div id="login" style="display:block">
+  <h2>Create an account</h2>
+
+  <!-- Step 1: who you are and what you came to do -->
+  <div class="step on" id="step-account">
+    <p>Tell us what you'll be doing. You can do both, and you can change it later.</p>
+
+    <div class="kinds" style="margin:14px 0">
+      <button type="button" class="kind" data-kind="buyer" aria-pressed="true">
+        <span class="name">Buying</span>
+        <span class="what">Post orders for what you need and receive goods.</span>
+      </button>
+      <button type="button" class="kind" data-kind="seller" aria-pressed="false">
+        <span class="name">Selling</span>
+        <span class="what">Bid on open orders, ship goods, get paid.</span>
+      </button>
+      <button type="button" class="kind" data-kind="both" aria-pressed="false">
+        <span class="name">Both</span>
+        <span class="what">Most outposts do both — they supply peers and order from them.</span>
+      </button>
+    </div>
+
+    <form id="signup-form">
+      <label class="field"><span class="label">Name</span>
+        <input id="s-username" autocomplete="name" required /></label>
+      <label class="field"><span class="label">Email</span>
+        <input id="s-email" type="email" autocomplete="email" required /></label>
+      <label class="field"><span class="label">Password</span>
+        <input id="s-password" type="password" autocomplete="new-password"
+               minlength="10" required />
+        <span class="label" style="text-transform:none;letter-spacing:0;color:var(--faint)">
+          At least 10 characters.</span></label>
+      <button type="submit" id="s-submit">Create account</button>
+      <div class="err" id="signup-err"></div>
+    </form>
+
+    <p class="muted" style="font-size:13px;margin-top:16px">
+      Already have one? <a href="/static/market.html">Sign in</a>.
+    </p>
+  </div>
+
+  <!-- Step 2: sellers only — a payout address, asked now rather than at
+       settlement time when it would block a payment that already happened. -->
+  <div class="step" id="step-wallet">
+    <p class="ok">Account created. One more thing.</p>
+    <p>
+      A payment can only be confirmed if there's an address to confirm it
+      reached. Without one, settlements naming you as the payee are refused.
+    </p>
+    <form id="wallet-form">
+      <label class="field"><span class="label">Solana payout address</span>
+        <input id="s-wallet" class="mono"
+               placeholder="9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM" required /></label>
+      <button type="submit">Save and continue</button>
+      <div class="err" id="wallet-err"></div>
+    </form>
+    <p class="muted" style="font-size:13px;margin-top:14px">
+      <a href="#" id="skip-wallet">Skip for now</a> — you can add it from the
+      Supply page before your first settlement.
+    </p>
+  </div>
+
+  <!-- Step 3 -->
+  <div class="step" id="step-done">
+    <p class="ok">You're all set.</p>
+    <p>Where would you like to go?</p>
+    <p style="margin-top:14px">
+      <a href="/static/market.html">Supply — post an order or place a bid</a><br>
+      <a href="/static/resources.html">Resources — what the fabric is holding</a><br>
+      <a href="/static/console.html">Console — what needs attention</a>
+    </p>
+  </div>
+</div>
+
+<script type="module">
+import { API, el, setToken } from "/static/js/wayfarer.js";
+
+let kind = "buyer";
+
+document.querySelectorAll(".kind").forEach((b) =>
+  b.addEventListener("click", () => {
+    kind = b.dataset.kind;
+    document.querySelectorAll(".kind").forEach((o) =>
+      o.setAttribute("aria-pressed", String(o === b)));
+  }));
+
+function show(id) {
+  document.querySelectorAll(".step").forEach((s) => s.classList.toggle("on", s.id === id));
+}
+
+/* Signup and login return their failures as plain text with a real status
+ * code, so read the body for the message rather than inventing one. */
+async function post(path, body) {
+  const res = await fetch(`${API}${path}`, {
+    method: path.endsWith("/wallet") ? "PUT" : "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(localStorage.getItem("tidw_token")
+        ? { Authorization: `Bearer ${localStorage.getItem("tidw_token")}` } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(text || `Request failed (${res.status})`);
+  return text ? JSON.parse(text) : null;
+}
+
+el("signup-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const err = el("signup-err"); err.textContent = "";
+  const btn = el("s-submit"); btn.disabled = true;
+  try {
+    const r = await post("/local-auth/register", {
+      username: el("s-username").value,
+      email: el("s-email").value,
+      password: el("s-password").value,
+      account_type: kind,
+    });
+    // Signup returns a token, so the new account lands signed in.
+    setToken(r.token);
+    show(r.needs_payout_wallet ? "step-wallet" : "step-done");
+  } catch (ex) {
+    err.textContent = ex.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+el("wallet-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const err = el("wallet-err"); err.textContent = "";
+  try {
+    await post("/me/wallet", { wallet_address: el("s-wallet").value.trim() });
+    show("step-done");
+  } catch (ex) {
+    err.textContent = ex.message;
+  }
+});
+
+el("skip-wallet").addEventListener("click", (e) => { e.preventDefault(); show("step-done"); });
+</script>
+</body>
+</html>

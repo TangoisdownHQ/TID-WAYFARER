@@ -109,6 +109,12 @@ pub struct LocationQuantity {
     pub outpost_name: String,
     pub location: Option<String>,
     pub quantity: i64,
+    /// This location's reorder point.
+    pub threshold: i64,
+    /// How much would bring this location back to its reorder point. This is
+    /// the number a restock order should ask for — not the fabric-wide gap,
+    /// because stock at another outpost is not stock you can use here.
+    pub shortfall: i64,
     pub below_threshold: bool,
 }
 
@@ -126,6 +132,10 @@ pub struct RolledItem {
     /// when the fabric-wide total looks healthy. Stock at the wrong location
     /// is not available stock.
     pub below_threshold_somewhere: bool,
+    /// Sum of every location's own shortfall — what it would take to bring
+    /// *every* site back to its reorder point, which is the only number that
+    /// makes sense to reorder against.
+    pub shortfall_total: i64,
     pub by_location: Vec<LocationQuantity>,
 }
 
@@ -408,16 +418,22 @@ fn merge(sources: Vec<SourceStatus>, summaries: Vec<OutpostSummary>) -> Inventor
                 // no total can claim to be a full count.
                 complete,
                 below_threshold_somewhere: false,
+                shortfall_total: 0,
                 by_location: Vec::new(),
             });
 
+            let shortfall = (item.threshold - item.quantity).max(0);
+
             entry.total_quantity += item.quantity;
             entry.below_threshold_somewhere |= item.below_threshold;
+            entry.shortfall_total += shortfall;
             entry.by_location.push(LocationQuantity {
                 node_id: summary.node_id.clone(),
                 outpost_name: summary.outpost_name.clone(),
                 location: item.location.clone(),
                 quantity: item.quantity,
+                threshold: item.threshold,
+                shortfall,
                 below_threshold: item.below_threshold,
             });
         }
@@ -544,6 +560,37 @@ mod tests {
         assert_eq!(r.items[0].total_quantity, 1000);
         assert!(r.items[0].below_threshold_somewhere);
         assert_eq!(r.items_below_threshold, 1);
+    }
+
+    #[test]
+    fn shortfall_is_per_location_not_fabric_wide() {
+        // The number a restock order is placed against. A site that is over its
+        // reorder point contributes nothing — its surplus must not cancel out
+        // another site's gap, because stock at HQ is not stock at the farm.
+        let r = merge(
+            vec![source("a", "local"), source("b", "ok")],
+            vec![
+                summary("a", "HQ", vec![item("Seed", "kg", 995, 10, "silo")]),
+                summary("b", "Farm", vec![item("Seed", "kg", 5, 50, "shed")]),
+            ],
+        );
+
+        assert_eq!(r.items[0].shortfall_total, 45, "only the farm is short");
+        let farm = r.items[0].by_location.iter().find(|l| l.outpost_name == "Farm").unwrap();
+        let hq = r.items[0].by_location.iter().find(|l| l.outpost_name == "HQ").unwrap();
+        assert_eq!(farm.shortfall, 45);
+        assert_eq!(farm.threshold, 50);
+        assert_eq!(hq.shortfall, 0, "a site above its threshold is never negative");
+    }
+
+    #[test]
+    fn a_fully_stocked_fabric_has_nothing_to_reorder() {
+        let r = merge(
+            vec![source("a", "local")],
+            vec![summary("a", "HQ", vec![item("Bolts", "each", 900, 10, "bin")])],
+        );
+        assert_eq!(r.items[0].shortfall_total, 0);
+        assert!(!r.items[0].below_threshold_somewhere);
     }
 
     #[test]

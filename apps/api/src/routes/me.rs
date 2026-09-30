@@ -4,6 +4,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use sqlx::Row;
 use uuid::Uuid;
 
 use crate::routes::auth_middleware::AuthenticatedUser;
@@ -24,7 +25,59 @@ pub struct MeResponse {
 pub fn me_routes() -> Router<AppState> {
     Router::new()
         .route("/me", get(me_handler))
+        .route("/profile", get(get_profile))
         .route("/wallet", get(get_wallet).put(put_wallet))
+}
+
+/// The caller's own account, as the UI needs it: who they are, what they came
+/// here to do, and whether they can be paid.
+#[derive(serde::Serialize)]
+pub struct ProfileResponse {
+    pub user_id: Uuid,
+    pub username: String,
+    pub email: String,
+    pub role: String,
+    /// buyer | seller | both
+    pub account_type: String,
+    pub wallet_address: Option<String>,
+    /// A seller with no payout wallet cannot be named as the payee on a
+    /// settlement, so the marketplace refuses to record one. Surfacing it here
+    /// lets the UI prompt before that happens rather than after.
+    pub needs_payout_wallet: bool,
+}
+
+/// GET /api/me/profile
+async fn get_profile(
+    State(state): State<AppState>,
+    AuthenticatedUser(claims): AuthenticatedUser,
+) -> Result<Json<ProfileResponse>, (StatusCode, String)> {
+    let user_id = uid(&claims)?;
+
+    let row = sqlx::query(
+        "SELECT username, email, role, account_type, wallet_address FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "profile lookup failed");
+        (StatusCode::INTERNAL_SERVER_ERROR, "profile lookup failed".to_string())
+    })?
+    .ok_or((StatusCode::NOT_FOUND, "no such user".to_string()))?;
+
+    let account_type: String = row.get("account_type");
+    let wallet_address: Option<String> = row.get("wallet_address");
+
+    Ok(Json(ProfileResponse {
+        user_id,
+        username: row.get("username"),
+        email: row.get("email"),
+        role: row.get("role"),
+        needs_payout_wallet: matches!(account_type.as_str(), "seller" | "both")
+            && wallet_address.is_none(),
+        account_type,
+        wallet_address,
+    }))
 }
 
 async fn me_handler(AuthenticatedUser(claims): AuthenticatedUser) -> Json<MeResponse> {
