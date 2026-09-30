@@ -2,7 +2,7 @@
   <img src="docs/banner.svg" alt="TID Wayfarer — a logistics ecosystem for operations spread across places that can't rely on a network. One view of every resource across a farm, a port, Earth HQ, the Moon and Mars." width="100%">
 </p>
 
-# TID Wayfarer 🚀
+# TID Wayfarer 
 
 [![Rust](https://img.shields.io/badge/Rust-stable-orange?logo=rust)](https://www.rust-lang.org/)
 [![Build Status](https://img.shields.io/github/actions/workflow/status/TangoisdownHQ/TID-WAYFARER/rust.yml?branch=main)](https://github.com/TangoisdownHQ/TID-WAYFARER/actions)
