@@ -384,11 +384,102 @@ pub async fn register_node(
     if let Err(e) = result {
         if let sqlx::Error::Database(db_err) = &e {
             if db_err.code() == Some(Cow::Borrowed("23505")) {
-                tracing::error!("❌ Duplicate API endpoint");
+                // The endpoint is already claimed by a different node id.
+                //
+                // Two very different situations produce this, and the endpoint
+                // alone cannot tell them apart: an outpost that regenerated its
+                // identity (redeploy, lost key volume, rebuilt host) legitimately
+                // reclaiming its own address, or an attacker trying to take over a
+                // live peer's address so traffic routes to it.
+                //
+                // Refusing both meant a redeployed outpost was permanently locked
+                // out of its own endpoint with no recovery path short of manual
+                // SQL — which is what happened here. Allowing both would make the
+                // uniqueness check pointless.
+                //
+                // So: let a *stale* claim be taken over, and refuse a live one. If
+                // the incumbent has been heard from inside the window it is still
+                // out there and its address is not up for grabs.
+                let takeover_after = std::env::var("REGISTRATION_TAKEOVER_SECS")
+                    .ok()
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .unwrap_or(900);
+
+                let incumbent: Option<(uuid::Uuid, Option<chrono::DateTime<chrono::Utc>>)> =
+                    sqlx::query_as(
+                        "SELECT node_id, last_seen FROM node_registry WHERE api_endpoint = $1",
+                    )
+                    .bind(&payload.api_endpoint)
+                    .fetch_optional(&state.db)
+                    .await
+                    .ok()
+                    .flatten();
+
+                if let Some((old_node, last_seen)) = incumbent {
+                    let stale = last_seen
+                        .map(|t| (Utc::now() - t).num_seconds() >= takeover_after)
+                        .unwrap_or(true);
+
+                    if stale {
+                        tracing::warn!(
+                            endpoint = %payload.api_endpoint,
+                            previous_node = %old_node,
+                            new_node = %payload.node_id,
+                            "endpoint reclaimed from a stale registration"
+                        );
+                        let replaced = sqlx::query(
+                            r#"
+                            UPDATE node_registry
+                            SET node_id = $1, name = $2, public_key = $3,
+                                kem_public_key = COALESCE($4, kem_public_key),
+                                revoked = false, last_seen = NOW()
+                            WHERE api_endpoint = $5
+                            "#,
+                        )
+                        .bind(node_uuid)
+                        .bind(&payload.name)
+                        .bind(&payload.public_key)
+                        .bind(&payload.kem_public_key)
+                        .bind(&payload.api_endpoint)
+                        .execute(&state.db)
+                        .await;
+
+                        if replaced.is_ok() {
+                            return Json(NodeRegistrationResponse {
+                                status: "ok".into(),
+                                node_id: payload.node_id.clone(),
+                                registered_at: Utc::now().to_rfc3339(),
+                                core_node_id: Some(state.identity.node_id.clone()),
+                                core_public_key: Some(state.identity.public_key.clone()),
+                                core_name: Some(
+                                    std::env::var("OUTPOST_NAME")
+                                        .unwrap_or_else(|_| "tid-wayfarer".into()),
+                                ),
+                                core_kem_public_key: Some(
+                                    base64::engine::general_purpose::STANDARD.encode(
+                                        pqcrypto_traits::kem::PublicKey::as_bytes(&state.commsec.pk),
+                                    ),
+                                ),
+                            });
+                        }
+                    } else {
+                        tracing::warn!(
+                            endpoint = %payload.api_endpoint,
+                            incumbent = %old_node,
+                            claimant = %payload.node_id,
+                            "refused: endpoint belongs to a node still in contact"
+                        );
+                        return reject(
+                            "that endpoint is registered to another node that is still in contact",
+                            payload.node_id,
+                        );
+                    }
+                }
             }
         }
 
-        return reject("error", payload.node_id);
+        tracing::error!(error = %e, node = %payload.node_id, "registration failed");
+        return reject("registration failed", payload.node_id);
     }
 
     Json(NodeRegistrationResponse {

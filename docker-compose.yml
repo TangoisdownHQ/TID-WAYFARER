@@ -75,18 +75,26 @@ services:
         condition: service_healthy
 
     environment:
-      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-devpassword}@tidasone-db-v2:5432/tidasone
+      ADMIN_URL: postgres://postgres:${POSTGRES_PASSWORD:-devpassword}@tidasone-db-v2:5432
 
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         set -e
-        echo "applying migrations..."
-        for f in /app/migrations/*.sql; do
-          psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$$f" >/dev/null
-          echo "  ok $$(basename $$f)"
+        # Each outpost owns its own database — that is the product's premise,
+        # and a shared one would make the fabric a lie: peers would read each
+        # other's rows directly and a partition could never be simulated.
+        for db in tidasone tidasone_b; do
+          if ! psql "$$ADMIN_URL/$$db" -c 'SELECT 1' >/dev/null 2>&1; then
+            echo "creating $$db"
+            psql "$$ADMIN_URL/postgres" -q -c "CREATE DATABASE $$db"
+          fi
+          echo "migrating $$db"
+          for f in /app/migrations/*.sql; do
+            psql "$$ADMIN_URL/$$db" -v ON_ERROR_STOP=1 -q -f "$$f" >/dev/null
+          done
         done
-        echo "schema up to date"
+        echo "both outpost schemas up to date"
 
     networks:
       - tidasone-net
@@ -130,6 +138,10 @@ services:
 
     volumes:
       - ./shared/static:/app/static:ro
+      # Node identity and the ML-KEM keypair. Without this every container
+      # recreate mints a new Ed25519 key, peers keep the old one on file, and
+      # signed requests start failing with "node not in registry".
+      - core-keys:/app/keys
 
     networks:
       - tidasone-net
@@ -158,7 +170,8 @@ services:
     restart: unless-stopped
 
     environment:
-      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-devpassword}@tidasone-db-v2:5432/tidasone
+      # Its own database. Two outposts sharing one would not be a fabric.
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-devpassword}@tidasone-db-v2:5432/tidasone_b
       POSTGRES_HOST: tidasone-db-v2
       POSTGRES_PORT: 5432
 
@@ -178,6 +191,7 @@ services:
 
     volumes:
       - ./shared/static:/app/static:ro
+      - outpost-b-keys:/app/keys
 
     networks:
       - tidasone-net
@@ -231,4 +245,8 @@ services:
 networks:
   tidasone-net:
     external: true
+
+volumes:
+  core-keys:
+  outpost-b-keys:
 
