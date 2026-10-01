@@ -25,18 +25,13 @@
 </div>
 
 <div id="app" style="display:none">
-  <header>
-    <h1>Wayfarer <span class="ident">supply</span></h1>
-    <nav>
-      <a href="/static/console.html">Console</a>
-      <a href="/static/resources.html">Resources</a>
-      <a href="/static/market.html" aria-current="page">Supply</a>
-      <a href="/static/map.html">Map</a>
-      <button class="linkish" id="signout" type="button">Sign out</button>
-    </nav>
-  </header>
+  <header></header>
 
   <div class="wrap">
+
+    <div id="fabricbar"></div>
+    <div id="searchbar"></div>
+
 
     <!-- Shown only when the signed-in user has no payout wallet. Settlement is
          refused without one (there would be nobody to confirm was paid), so
@@ -119,7 +114,7 @@
 </div>
 
 <script type="module">
-import { api, boot, ageSince, el, setText, esc } from "/static/js/wayfarer.js";
+import { api, boot, ageSince, el, setText, esc , mountNav, mountFabricBar, mountSearch } from "/static/js/wayfarer.js";
 
 let openOrderId = null;
 
@@ -349,6 +344,9 @@ el("neworder").addEventListener("submit", async (e) => {
 });
 
 boot(() => {
+  mountNav("market.html", "supply");
+  mountFabricBar();
+  mountSearch();
   checkWallet().catch((e) => console.error(e));
   return refresh().catch((e) => console.error(e));
 }, 8000);

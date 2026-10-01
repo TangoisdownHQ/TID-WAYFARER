@@ -116,6 +116,37 @@ export function showApp() {
   if (app) app.style.display = "block";
 }
 
+/* ---- Navigation ----------------------------------------------------------
+ * One list, so a new page cannot be added and then be unreachable — which is
+ * how map.html and bodies-map.html ended up orphaned. Order follows the
+ * question each page answers, from "what needs me now" outward. */
+
+export const PAGES = [
+  ["console.html",    "Console",    "what needs me right now"],
+  ["resources.html",  "Resources",  "every resource, everywhere"],
+  ["forecast.html",   "Resupply",   "what runs out, and when"],
+  ["lots.html",       "Lots",       "batches, serials, expiry, recall"],
+  ["market.html",     "Supply",     "orders, bids, settlement"],
+  ["capsules.html",   "Capsules",   "shared hulls and manifests"],
+  ["compliance.html", "Compliance", "certificates and holds"],
+  ["map.html",        "Map",        "where things are"],
+];
+
+export function mountNav(current, ident) {
+  const header = $("header");
+  if (!header) return;
+  header.innerHTML = `
+    <h1>Wayfarer <span class="ident">${esc(ident ?? current.replace(".html", ""))}</span></h1>
+    <nav>
+      ${PAGES.map(([href, label, title]) =>
+        `<a href="/static/${href}" title="${esc(title)}"${
+          href === current ? ' aria-current="page"' : ""}>${esc(label)}</a>`).join("")}
+      <button class="linkish" id="signout" type="button">Sign out</button>
+    </nav>`;
+  const out = el("signout");
+  if (out) out.addEventListener("click", logout);
+}
+
 /* ---- Fabric bar ----------------------------------------------------------
  * Which outpost you are signed in to, who else is in the fabric, and how to
  * reach them. The console could report a count of online nodes but never said
@@ -234,6 +265,41 @@ export function mountSearch(hostId = "searchbar", { placeholder } = {}) {
   document.addEventListener("click", (e) => {
     if (!host.contains(e.target)) close();
   });
+}
+
+/**
+ * Everything a page needs that is not its own content: the sign-in panel, the
+ * header and nav, the fabric bar and the search box.
+ *
+ * Exists so adding a page is writing its content and nothing else. The pages
+ * that predate it each hand-rolled a login block, which is how one of them
+ * ended up with no token and 401ing silently for weeks.
+ */
+export function page({ current, ident, blurb, onReady, intervalMs = 15000, search = true }) {
+  const login = el("login");
+  if (login && !login.querySelector("#login-form")) {
+    login.innerHTML = `
+      <h2>${esc(ident ?? "Wayfarer")}</h2>
+      <p>${esc(blurb ?? "Sign in to continue.")}</p>
+      <form id="login-form">
+        <label class="field"><span class="label">Email</span>
+          <input id="email" type="email" autocomplete="username" required /></label>
+        <label class="field"><span class="label">Password</span>
+          <input id="password" type="password" autocomplete="current-password" required /></label>
+        <button type="submit">Sign in</button>
+        <div class="err" id="login-err"></div>
+      </form>
+      <p class="muted" style="font-size:13px;margin-top:14px">
+        No account? <a href="/static/signup.html">Create one</a>.
+      </p>`;
+  }
+
+  boot(() => {
+    mountNav(current, ident);
+    mountFabricBar();
+    if (search) mountSearch();
+    return Promise.resolve(onReady()).catch((e) => console.error(e));
+  }, intervalMs);
 }
 
 /**

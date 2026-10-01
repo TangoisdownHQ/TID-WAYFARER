@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Wayfarer — Capsules</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="/static/css/wayfarer.css" />
+<style>
+  .loc { color: var(--dim); font-family: var(--mono); font-size: 12px; }
+
+  /* Both budgets, always, side by side. A hull sells mass and volume and you
+     run out of one first — showing a single "capacity" would hide exactly the
+     thing an operator needs to plan against. The binding one is marked. */
+  .budget { display: grid; gap: 7px; min-width: 220px; }
+  .gauge { display: flex; align-items: center; gap: 9px; }
+  .gauge .glabel { font-family: var(--mono); font-size: 10px; letter-spacing: .14em;
+                   text-transform: uppercase; color: var(--dim); width: 46px; }
+  .track { position: relative; flex: 1; height: 9px; background: var(--bg);
+           border: 1px solid var(--edge); border-radius: 999px; overflow: hidden; }
+  .track .fill { position: absolute; inset: 0 auto 0 0; background: var(--signal); opacity: .5; }
+  .track.tight .fill { background: var(--lagging); opacity: .6; }
+  .track.full  .fill { background: var(--dark); opacity: .6; }
+  .gauge .gval { font-family: var(--mono); font-size: 11px; color: var(--dim); width: 108px; text-align: right; }
+  .binding { color: var(--lagging); font-family: var(--mono); font-size: 10.5px; }
+
+  .manifest { background: var(--panel-2); }
+  .manifest td { padding-top: 6px; padding-bottom: 6px; font-size: 12.5px; }
+  tr.cap { cursor: pointer; }
+  tr.cap:hover td { background: var(--panel-2); }
+  .caret { color: var(--dim); font-family: var(--mono); width: 11px; display: inline-block; }
+</style>
+</head>
+<body>
+
+<div id="login"></div>
+
+<div id="app" style="display:none">
+  <header></header>
+  <div class="wrap">
+    <div id="fabricbar"></div>
+    <div id="searchbar"></div>
+
+    <div class="sectionhead" style="margin-top:0">
+      <h2>Capsules</h2><span class="label" id="count">—</span>
+    </div>
+    <p class="muted" style="margin:0 0 14px;font-size:13px;max-width:78ch">
+      A hull with two finite budgets and a departure. Several parties can share
+      one: each booking records its own mass, volume and share of the total, so
+      the cost split stays reproducible even if the stated capacity is later
+      corrected. Click a capsule for its manifest.
+    </p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th></th><th>Capsule</th><th>Destination</th><th>Departs</th>
+          <th style="min-width:250px">Mass and volume</th><th class="num">Parties</th><th>State</th>
+        </tr></thead>
+        <tbody id="rows"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import { api, el, esc, setText, page } from "/static/js/wayfarer.js";
+
+const STATE_TONE = {
+  open: "ok", sealed: "wait", in_transit: "wait", arrived: "idle", cancelled: "bad",
+};
+
+let open = new Set();
+
+function gauge(label, used, capacity, pct, binding) {
+  const p = Number(pct);
+  const tone = p >= 95 ? "full" : p >= 75 ? "tight" : "";
+  return `<div class="gauge">
+      <span class="glabel">${esc(label)}</span>
+      <span class="track ${tone}"><span class="fill" style="width:${Math.min(100, p)}%"></span></span>
+      <span class="gval">${esc(used)} / ${esc(capacity)}${binding ? ' <span class="binding">◀</span>' : ""}</span>
+    </div>`;
+}
+
+async function refresh() {
+  const caps = await api("/capsules");
+  setText("count", `${caps.length} hull${caps.length === 1 ? "" : "s"}`);
+
+  const body = el("rows");
+  if (!caps.length) {
+    body.innerHTML = `<tr><td colspan="7" class="empty">No capsules yet.</td></tr>`;
+    return;
+  }
+
+  const blocks = await Promise.all(caps.map(async (c) => {
+    const rows = [`
+      <tr class="cap" data-id="${esc(c.id)}">
+        <td class="caret">${open.has(c.id) ? "▾" : "▸"}</td>
+        <td><strong>${esc(c.name)}</strong></td>
+        <td class="loc">${esc(c.destinationAddress ?? (c.destinationBodyId ? `body ${c.destinationBodyId}` : "—"))}</td>
+        <td class="loc">${c.departsAt ? esc(new Date(c.departsAt).toISOString().slice(0, 10)) : "—"}</td>
+        <td><div class="budget">
+          ${gauge("mass", c.mass.bookedKg + " kg", c.mass.capacityKg + " kg", c.mass.percentUsed, c.bindingConstraint === "mass")}
+          ${gauge("vol", c.volume.bookedM3 + " m³", c.volume.capacityM3 + " m³", c.volume.percentUsed, c.bindingConstraint === "volume")}
+        </div></td>
+        <td class="num">${c.bookings}</td>
+        <td><span class="pill ${STATE_TONE[c.status] ?? "idle"}">${esc(c.status)}</span></td>
+      </tr>`];
+
+    if (open.has(c.id)) {
+      let m;
+      try { m = await api(`/capsules/${c.id}/manifest`); }
+      catch { m = { manifest: [] }; }
+      if (!m.manifest.length) {
+        rows.push(`<tr class="manifest"><td></td><td colspan="6" class="loc">Nothing booked.</td></tr>`);
+      } else {
+        rows.push(...m.manifest.map((x) => `
+          <tr class="manifest">
+            <td></td>
+            <td class="loc">${esc(x.shipper ?? "—")}</td>
+            <td colspan="2">${esc(x.description)}</td>
+            <td class="loc">${esc(x.massKg)} kg · ${esc(x.volumeM3)} m³
+              ${x.shareOfMass ? ` · <span title="share of the hull by mass">${(Number(x.shareOfMass) * 100).toFixed(1)}%</span>` : ""}</td>
+            <td class="num loc">${x.price ? esc(x.price) + " TIDAT" : "—"}</td>
+            <td></td>
+          </tr>`));
+      }
+    }
+    return rows.join("");
+  }));
+
+  body.innerHTML = blocks.join("");
+  body.querySelectorAll("tr.cap").forEach((tr) =>
+    tr.addEventListener("click", () => {
+      const id = tr.dataset.id;
+      open.has(id) ? open.delete(id) : open.add(id);
+      refresh().catch((e) => console.error(e));
+    }));
+}
+
+page({
+  current: "capsules.html",
+  ident: "capsules",
+  blurb: "Sign in to see hulls and manifests.",
+  onReady: refresh,
+  intervalMs: 20000,
+});
+</script>
+</body>
+</html>

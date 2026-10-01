@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Wayfarer — Lots</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="/static/css/wayfarer.css" />
+<style>
+  .loc { color: var(--dim); font-family: var(--mono); font-size: 12px; }
+  .tracebox { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 14px; }
+  .tracebox .field { margin-bottom: 0; flex: 1; min-width: 220px; }
+  tr.gone td { background: linear-gradient(90deg, rgba(251,106,106,.07), transparent 60%); }
+  .daysleft { font-family: var(--mono); }
+  .daysleft.past { color: var(--dark); }
+  .daysleft.soon { color: var(--lagging); }
+  dialog {
+    border: 1px solid var(--edge-lit); border-radius: var(--r);
+    background: var(--panel); color: var(--ink); padding: 0; max-width: 460px; width: 92%;
+  }
+  dialog::backdrop { background: rgba(3,6,10,.72); }
+  dialog .body { padding: 20px 22px 22px; }
+  dialog h3 { margin: 0 0 6px; font-size: 16px; }
+  .actions { display: flex; gap: 9px; margin-top: 6px; }
+</style>
+</head>
+<body>
+
+<div id="login"></div>
+
+<div id="app" style="display:none">
+  <header></header>
+  <div class="wrap">
+    <div id="fabricbar"></div>
+    <div id="searchbar"></div>
+
+    <div class="rail" id="rail">
+      <div><span class="label">Expired, still on the shelf</span><div class="since" id="lapsed">—</div></div>
+      <p class="muted" style="margin:0;font-size:13px;max-width:62ch" id="railnote"></p>
+    </div>
+
+    <!-- Recall first: it is the thing someone opens this page in a hurry to do. -->
+    <div class="sectionhead" style="margin-top:22px"><h2>Trace a batch</h2>
+      <span class="label">Recall · provenance</span></div>
+    <p class="muted" style="margin:0 0 12px;font-size:13px;max-width:74ch">
+      A supplier notice names a lot code. This answers where it went and, more
+      to the point, how much of it is still in usable stock.
+    </p>
+    <form class="tracebox" id="traceform">
+      <label class="field"><span class="label">Lot code or serial</span>
+        <input id="t-q" class="mono" placeholder="O2-BATCH-9  or  SN-000123" required /></label>
+      <button type="submit">Trace</button>
+    </form>
+    <div id="traceout"></div>
+
+    <div class="sectionhead"><h2>Expiring stock</h2>
+      <span class="label"><select id="horizon" style="width:auto;padding:3px 7px;font-size:12px">
+        <option value="7">7 days</option><option value="30" selected>30 days</option>
+        <option value="90">90 days</option><option value="365">1 year</option>
+      </select></span></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>Item</th><th>Lot / serial</th><th>Location</th>
+          <th class="num">Qty</th><th class="num">Days left</th><th>State</th><th></th>
+        </tr></thead>
+        <tbody id="expiring"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Quarantine refuses to proceed without a reason: a recall with nothing on
+     the record is not a recall. -->
+<dialog id="qdialog">
+  <div class="body">
+    <h3 id="q-title">Quarantine lot</h3>
+    <p class="muted" style="margin:0 0 14px;font-size:13px">
+      This removes the lot from usable stock. The reason is written into its
+      pedigree and is the only record of why.
+    </p>
+    <form id="qform">
+      <label class="field"><span class="label">Reason</span>
+        <input id="q-reason" placeholder="supplier notice SN-2026-14: seal failure under vacuum" required /></label>
+      <div class="err" id="q-err"></div>
+      <div class="actions">
+        <button type="submit">Quarantine</button>
+        <button type="button" class="linkish" id="q-cancel" style="color:var(--dim)">Cancel</button>
+      </div>
+    </form>
+  </div>
+</dialog>
+
+<script type="module">
+import { api, el, esc, setText, page } from "/static/js/wayfarer.js";
+
+const STATUS_TONE = {
+  available: "ok", reserved: "wait", in_transit: "wait",
+  consumed: "idle", quarantined: "bad", expired: "bad",
+};
+
+let pendingLot = null;
+
+function daysCell(d, expired) {
+  if (d == null) return '<span class="loc">—</span>';
+  const cls = expired ? "past" : d <= 14 ? "soon" : "";
+  return `<span class="daysleft ${cls}">${expired ? `${esc(d)}` : `${esc(d)}`}</span>`;
+}
+
+async function loadExpiring() {
+  const days = el("horizon").value;
+  const r = await api(`/lots/expiring?days=${days}`);
+
+  const rail = el("rail");
+  rail.className = `rail ${r.alreadyExpired ? "dark" : r.count ? "lagging" : "live"}`;
+  setText("lapsed", r.alreadyExpired);
+  setText("railnote", r.alreadyExpired
+    ? "Past its date and still marked usable. This is a present problem, not a planning horizon."
+    : r.count ? `${r.count} lot(s) lapse inside the window. Nothing is overdue yet.`
+              : "Nothing lapses inside this window.");
+
+  const body = el("expiring");
+  if (!r.count) {
+    body.innerHTML = `<tr><td colspan="7" class="empty">Nothing expiring in the next ${esc(days)} days.</td></tr>`;
+    return;
+  }
+  body.innerHTML = r.lots.map((l) => `
+    <tr${l.alreadyExpired ? ' class="gone"' : ""}>
+      <td>${esc(l.item)}</td>
+      <td class="mono">${esc(l.serial ?? l.lotCode ?? "—")}</td>
+      <td class="loc">${esc(l.location ?? "—")}</td>
+      <td class="num">${esc(l.quantity)} <span class="loc">${esc(l.unit)}</span></td>
+      <td class="num">${daysCell(l.daysRemaining, l.alreadyExpired)}</td>
+      <td><span class="pill ${STATUS_TONE[l.status] ?? "idle"}">${esc(l.status)}</span>
+          ${l.alreadyExpired ? ' <span class="pill bad">expired</span>' : ""}</td>
+      <td><button class="linkish quarantine" data-id="${esc(l.lotId)}"
+            data-label="${esc(l.serial ?? l.lotCode ?? l.item)}"
+            style="color:var(--dark);font-size:12px">Quarantine</button></td>
+    </tr>`).join("");
+
+  body.querySelectorAll("button.quarantine").forEach((b) =>
+    b.addEventListener("click", () => {
+      pendingLot = { id: b.dataset.id, label: b.dataset.label };
+      setText("q-title", `Quarantine ${b.dataset.label}`);
+      el("q-reason").value = "";
+      el("q-err").textContent = "";
+      el("qdialog").showModal();
+    }));
+}
+
+el("horizon").addEventListener("change", () => loadExpiring().catch((e) => console.error(e)));
+el("q-cancel").addEventListener("click", () => el("qdialog").close());
+
+el("qform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!pendingLot) return;
+  const err = el("q-err"); err.textContent = "";
+  try {
+    await api(`/lots/${pendingLot.id}/quarantine`, {
+      method: "POST",
+      body: JSON.stringify({ reason: el("q-reason").value }),
+    });
+    el("qdialog").close();
+    await loadExpiring();
+    if (el("t-q").value.trim()) await runTrace(el("t-q").value);
+  } catch (ex) {
+    err.textContent = /400/.test(ex.message) ? "A quarantine needs a reason." : ex.message;
+  }
+});
+
+async function runTrace(term) {
+  const q = term.trim();
+  if (!q) return;
+  const out = el("traceout");
+  // A lot code and a serial are both plausible; try the code first and fall
+  // back, so the operator does not have to know which they are holding.
+  let r = await api(`/lots/trace?lot_code=${encodeURIComponent(q)}`);
+  if (!r.matches) r = await api(`/lots/trace?serial=${encodeURIComponent(q)}`);
+
+  if (!r.matches) {
+    out.innerHTML = `<div class="allclear">Nothing matches “${esc(q)}”.</div>`;
+    return;
+  }
+  out.innerHTML = `
+    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:13px;margin-bottom:14px">
+      <div class="card"><span class="label">Lots found</span><div class="v">${r.matches}</div></div>
+      <div class="card"><span class="label">Total quantity</span><div class="v">${esc(r.totalQuantity)}</div></div>
+      <div class="card"><span class="label">Still usable</span>
+        <div class="v ${r.stillInUsableStock ? "dark" : "live"}">${r.stillInUsableStock}</div>
+        <span class="loc">lots to pull</span></div>
+    </div>
+    <div class="tablewrap" style="margin-bottom:22px">
+      <table>
+        <thead><tr><th>Item</th><th>Lot / serial</th><th>Location</th>
+          <th class="num">Qty</th><th>Supplier</th><th>State</th><th></th></tr></thead>
+        <tbody>${r.lots.map((l) => `
+          <tr>
+            <td>${esc(l.item)}</td>
+            <td class="mono">${esc(l.serial ?? l.lotCode ?? "—")}</td>
+            <td class="loc">${esc(l.location ?? "—")}</td>
+            <td class="num">${esc(l.quantity)} <span class="loc">${esc(l.unit)}</span></td>
+            <td class="loc">${esc(l.supplier ?? "—")}</td>
+            <td><span class="pill ${STATUS_TONE[l.status] ?? "idle"}">${esc(l.status)}</span></td>
+            <td>${["available", "reserved"].includes(l.status)
+              ? `<button class="linkish quarantine" data-id="${esc(l.lotId)}"
+                   data-label="${esc(l.serial ?? l.lotCode ?? l.item)}"
+                   style="color:var(--dark);font-size:12px">Quarantine</button>` : ""}</td>
+          </tr>`).join("")}</tbody>
+      </table>
+    </div>`;
+
+  out.querySelectorAll("button.quarantine").forEach((b) =>
+    b.addEventListener("click", () => {
+      pendingLot = { id: b.dataset.id, label: b.dataset.label };
+      setText("q-title", `Quarantine ${b.dataset.label}`);
+      el("q-reason").value = "";
+      el("q-err").textContent = "";
+      el("qdialog").showModal();
+    }));
+}
+
+el("traceform").addEventListener("submit", (e) => {
+  e.preventDefault();
+  runTrace(el("t-q").value).catch((ex) => {
+    el("traceout").innerHTML = `<div class="allclear">${esc(ex.message)}</div>`;
+  });
+});
+
+page({
+  current: "lots.html",
+  ident: "lots",
+  blurb: "Sign in to trace batches and check expiry.",
+  onReady: loadExpiring,
+  intervalMs: 60000,
+});
+</script>
+</body>
+</html>

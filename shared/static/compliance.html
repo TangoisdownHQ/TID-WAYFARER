@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Wayfarer — Compliance</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="/static/css/wayfarer.css" />
+<style>
+  .loc { color: var(--dim); font-family: var(--mono); font-size: 12px; }
+  .daysleft { font-family: var(--mono); }
+  .daysleft.past { color: var(--dark); }
+  .daysleft.soon { color: var(--lagging); }
+  dialog {
+    border: 1px solid var(--edge-lit); border-radius: var(--r);
+    background: var(--panel); color: var(--ink); padding: 0; max-width: 520px; width: 92%;
+  }
+  dialog::backdrop { background: rgba(3,6,10,.72); }
+  dialog .body { padding: 20px 22px 22px; }
+  dialog h3 { margin: 0 0 6px; font-size: 16px; }
+  .actions { display: flex; gap: 9px; margin-top: 6px; }
+  .warnbox {
+    border: 1px solid var(--dark); border-left-width: 3px; border-radius: 8px;
+    padding: 11px 13px; margin: 12px 0 14px; font-size: 12.5px; color: var(--ink);
+    background: linear-gradient(90deg, rgba(251,106,106,.08), transparent 70%);
+  }
+</style>
+</head>
+<body>
+
+<div id="login"></div>
+
+<div id="app" style="display:none">
+  <header></header>
+  <div class="wrap">
+    <div id="fabricbar"></div>
+    <div id="searchbar"></div>
+
+    <div class="rail" id="rail">
+      <div><span class="label">Shipments held</span><div class="since" id="held">—</div></div>
+      <p class="muted" style="margin:0;font-size:13px;max-width:62ch" id="railnote"></p>
+    </div>
+
+    <div class="sectionhead" style="margin-top:22px"><h2>Active holds</h2>
+      <span class="label">Blocked until cleared or overridden</span></div>
+    <p class="muted" style="margin:0 0 12px;font-size:13px;max-width:76ch">
+      A hold blocks by default. Clearing one means the underlying problem was
+      fixed; overriding one means shipping anyway, which is sometimes genuinely
+      necessary and is always recorded against the person who decided it.
+    </p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>Order</th><th>Missing</th><th>Reason</th><th>Raised</th><th></th>
+        </tr></thead>
+        <tbody id="holds"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="sectionhead"><h2>Certificates lapsing</h2>
+      <span class="label"><select id="horizon" style="width:auto;padding:3px 7px;font-size:12px">
+        <option value="30">30 days</option><option value="60" selected>60 days</option>
+        <option value="180">180 days</option>
+      </select></span></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>Kind</th><th>Covers</th><th>Authority</th><th>Reference</th>
+          <th class="num">Days left</th><th>State</th>
+        </tr></thead>
+        <tbody id="certs"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="sectionhead"><h2>What each destination demands</h2>
+      <span class="label">Requirements</span></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Destination</th><th>Category</th><th>Requires</th><th>Note</th></tr></thead>
+        <tbody id="reqs"><tr><td colspan="4" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<dialog id="odialog">
+  <div class="body">
+    <h3>Override this hold</h3>
+    <div class="warnbox" id="o-what"></div>
+    <p class="muted" style="margin:0 0 12px;font-size:13px">
+      This ships goods that failed a compliance check. The reason below is the
+      only record of why, and it is stored against your account permanently.
+    </p>
+    <form id="oform">
+      <label class="field"><span class="label">Reason</span>
+        <input id="o-reason" placeholder="DDTC verbal authorisation 2026-10-01; written licence in transit, ref call log 4471" required /></label>
+      <div class="err" id="o-err"></div>
+      <div class="actions">
+        <button type="submit">Override and ship</button>
+        <button type="button" class="linkish" id="o-cancel" style="color:var(--dim)">Cancel</button>
+      </div>
+    </form>
+  </div>
+</dialog>
+
+<script type="module">
+import { api, el, esc, setText, ageSince, page } from "/static/js/wayfarer.js";
+
+let pending = null;
+
+async function loadHolds() {
+  const holds = await api("/compliance/holds?status=active");
+
+  const rail = el("rail");
+  rail.className = `rail ${holds.length ? "dark" : "live"}`;
+  setText("held", holds.length);
+  setText("railnote", holds.length
+    ? "These shipments will not move until each hold is cleared or deliberately overridden."
+    : "Nothing is held. Every shipment with a requirement has the certificate it needs.");
+
+  const body = el("holds");
+  if (!holds.length) {
+    body.innerHTML = `<tr><td colspan="5" class="empty">No active holds.</td></tr>`;
+    return;
+  }
+  body.innerHTML = holds.map((h) => `
+    <tr>
+      <td>${esc(h.order ?? h.orderId ?? "—")}</td>
+      <td><span class="pill bad">${esc(h.failedKind ?? "—")}</span></td>
+      <td class="muted" style="font-size:12.5px">${esc(h.reason)}</td>
+      <td class="loc">${esc(ageSince(h.createdAt))} ago</td>
+      <td style="white-space:nowrap">
+        <button class="linkish clear" data-id="${esc(h.id)}" style="color:var(--live);font-size:12px">Cleared</button>
+        <button class="linkish over" data-id="${esc(h.id)}"
+                data-what="${esc(h.reason)}" style="color:var(--dark);font-size:12px;margin-left:10px">Override</button>
+      </td>
+    </tr>`).join("");
+
+  body.querySelectorAll("button.clear").forEach((b) =>
+    b.addEventListener("click", async () => {
+      try { await api(`/compliance/holds/${b.dataset.id}/clear`, { method: "POST", body: "{}" }); await loadAll(); }
+      catch (e) { alert(e.message); }
+    }));
+
+  body.querySelectorAll("button.over").forEach((b) =>
+    b.addEventListener("click", () => {
+      pending = b.dataset.id;
+      el("o-what").textContent = b.dataset.what;
+      el("o-reason").value = "";
+      el("o-err").textContent = "";
+      el("odialog").showModal();
+    }));
+}
+
+el("o-cancel").addEventListener("click", () => el("odialog").close());
+el("oform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!pending) return;
+  const err = el("o-err"); err.textContent = "";
+  try {
+    await api(`/compliance/holds/${pending}/override`, {
+      method: "POST", body: JSON.stringify({ reason: el("o-reason").value }),
+    });
+    el("odialog").close();
+    await loadAll();
+  } catch (ex) {
+    err.textContent = /403/.test(ex.message)
+      ? "Only an admin can override a compliance hold."
+      : /400/.test(ex.message)
+      ? "Give a substantive reason — it is the only record of why this shipped."
+      : ex.message;
+  }
+});
+
+async function loadCerts() {
+  const r = await api(`/compliance/certifications/expiring?days=${el("horizon").value}`);
+  const body = el("certs");
+  if (!r.count) {
+    body.innerHTML = `<tr><td colspan="6" class="empty">No certificates lapse inside this window.</td></tr>`;
+    return;
+  }
+  body.innerHTML = r.certifications.map((c) => `
+    <tr>
+      <td><span class="pill ${c.alreadyExpired ? "bad" : "wait"}">${esc(c.kind)}</span></td>
+      <td>${esc(c.item ?? "—")}</td>
+      <td class="loc">${esc(c.authority ?? "—")}</td>
+      <td class="mono">${esc(c.identifier ?? "—")}</td>
+      <td class="num"><span class="daysleft ${c.alreadyExpired ? "past" : c.daysRemaining <= 14 ? "soon" : ""}">${esc(c.daysRemaining)}</span></td>
+      <td>${c.alreadyExpired ? '<span class="pill bad">expired</span>' : '<span class="pill wait">lapsing</span>'}</td>
+    </tr>`).join("");
+}
+
+async function loadReqs() {
+  const reqs = await api("/compliance/requirements");
+  const body = el("reqs");
+  if (!reqs.length) {
+    body.innerHTML = `<tr><td colspan="4" class="empty">No requirements configured — nothing is being checked.</td></tr>`;
+    return;
+  }
+  body.innerHTML = reqs.map((r) => `
+    <tr>
+      <td class="loc">${r.destinationBodyId == null ? "everywhere" : `body ${esc(r.destinationBodyId)}`}</td>
+      <td class="loc">${esc(r.itemCategory ?? "all")}</td>
+      <td><span class="pill idle">${esc(r.requiredKind)}</span></td>
+      <td class="muted" style="font-size:12.5px">${esc(r.note ?? "")}</td>
+    </tr>`).join("");
+}
+
+const loadAll = () => Promise.all([loadHolds(), loadCerts(), loadReqs()]);
+el("horizon").addEventListener("change", () => loadCerts().catch((e) => console.error(e)));
+
+page({
+  current: "compliance.html",
+  ident: "compliance",
+  blurb: "Sign in to review holds and certificates.",
+  onReady: loadAll,
+  intervalMs: 30000,
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Wayfarer — Resupply</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="/static/css/wayfarer.css" />
+<style>
+  /* The cover bar is the whole page in one shape: how long the stock lasts,
+     against how long replacing it takes. Lead time is drawn as a marker on the
+     bar rather than a separate number, because the comparison is the point and
+     two numbers side by side make the reader do the subtraction. */
+  .cover { position: relative; height: 22px; min-width: 150px; background: var(--bg);
+           border: 1px solid var(--edge); border-radius: 5px; overflow: hidden; }
+  .cover .fill { position: absolute; inset: 0 auto 0 0; background: var(--live); opacity: .34; }
+  .cover.late .fill { background: var(--dark); opacity: .30; }
+  .cover.soon .fill { background: var(--lagging); opacity: .32; }
+  .cover.unknown .fill { background: var(--unknown); opacity: .22; }
+  .cover .lead { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--ink); opacity: .85; }
+  .cover .lead::after {
+    content: "lead"; position: absolute; top: -1px; left: 4px;
+    font-family: var(--mono); font-size: 9px; color: var(--dim); white-space: nowrap;
+  }
+  .cover .txt { position: absolute; inset: 0; display: flex; align-items: center;
+                justify-content: center; font-family: var(--mono); font-size: 11.5px; }
+  .loc { color: var(--dim); font-family: var(--mono); font-size: 12px; }
+  .why { color: var(--dim); font-size: 12px; }
+  tr.late td { background: linear-gradient(90deg, rgba(251,106,106,.07), transparent 60%); }
+</style>
+</head>
+<body>
+
+<div id="login"></div>
+
+<div id="app" style="display:none">
+  <header></header>
+  <div class="wrap">
+    <div id="fabricbar"></div>
+    <div id="searchbar"></div>
+
+    <div class="rail" id="rail">
+      <div><span class="label">Cannot outlast resupply</span><div class="since" id="atrisk">—</div></div>
+      <p class="muted" style="margin:0;font-size:13px;max-width:62ch" id="railnote"></p>
+    </div>
+
+    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:13px;margin:16px 0">
+      <div class="card"><span class="label">Items tracked</span><div class="v" id="k-items">—</div></div>
+      <div class="card"><span class="label">Too little history</span><div class="v unknown" id="k-unknown">—</div>
+        <span class="loc">cannot be forecast</span></div>
+      <div class="card"><span class="label">Window</span><div class="v" id="k-window">—</div>
+        <span class="loc">consumption lookback</span></div>
+    </div>
+
+    <div class="sectionhead">
+      <h2>What runs out, and when</h2>
+      <span class="label">Ranked by urgency, not by level</span>
+    </div>
+    <p class="muted" style="margin:0 0 14px;font-size:13px;max-width:78ch">
+      A reorder threshold is correct for exactly one burn rate. These rows are
+      ordered by whether the stock on hand outlasts the time it takes to
+      replace it — an item can sit well above its threshold and still miss the
+      next resupply window.
+    </p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>Resource</th><th>Location</th><th class="num">On hand</th>
+          <th class="num">Burn / day</th><th style="min-width:170px">Cover vs lead time</th>
+          <th class="num">Order by</th><th class="num">Order</th><th>Confidence</th>
+        </tr></thead>
+        <tbody id="rows"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+
+    <p class="muted" style="font-size:12.5px;margin-top:14px;max-width:78ch">
+      A rate from two withdrawals is arithmetic, not a forecast. Items with
+      fewer than three consumption events, or less than a week of history, are
+      shown without a rate rather than with a falsely precise one — they are
+      unknown, not safe, which is why they sort last instead of looking fine.
+    </p>
+  </div>
+</div>
+
+<script type="module">
+import { api, el, esc, setText, page } from "/static/js/wayfarer.js";
+
+const CONF = { good: "ok", erratic: "wait", insufficient: "unknown" };
+
+function coverBar(f) {
+  const cover = f.daysOfCover;
+  const lead = f.leadTimeDays;
+
+  if (cover == null) {
+    return `<div class="cover unknown"><div class="fill" style="width:100%"></div>
+            <span class="txt" style="color:var(--unknown)">no estimate</span></div>`;
+  }
+  // Scale to whichever is larger so the lead marker always lands on the bar.
+  const span = Math.max(cover, lead ?? 0) * 1.15 || 1;
+  const pct = Math.min(100, (cover / span) * 100);
+  const leadPct = lead != null ? Math.min(100, (lead / span) * 100) : null;
+  const tone = f.pastReorderPoint ? "late" : (lead != null && cover < lead * 2) ? "soon" : "";
+
+  return `<div class="cover ${tone}">
+      <div class="fill" style="width:${pct.toFixed(1)}%"></div>
+      ${leadPct != null ? `<div class="lead" style="left:${leadPct.toFixed(1)}%"></div>` : ""}
+      <span class="txt">${esc(cover)}d cover${lead != null ? ` · ${esc(lead)}d lead` : ""}</span>
+    </div>`;
+}
+
+async function refresh() {
+  const r = await api("/movements/forecast");
+
+  const rail = el("rail");
+  rail.className = `rail ${r.cannotOutlastResupply ? "dark" : "live"}`;
+  setText("atrisk", r.cannotOutlastResupply);
+  setText("railnote", r.cannotOutlastResupply
+    ? "These will not arrive before the stock runs out. Ordering today is already late — the question is how late."
+    : "Everything with enough history has more cover than its resupply takes.");
+
+  setText("k-items", r.items);
+  setText("k-unknown", r.withoutEnoughHistory);
+  setText("k-window", `${r.windowDays}d`);
+
+  const body = el("rows");
+  if (!r.forecasts.length) {
+    body.innerHTML = `<tr><td colspan="8" class="empty">No inventory recorded at this outpost.</td></tr>`;
+    return;
+  }
+
+  body.innerHTML = r.forecasts.map((f) => `
+    <tr${f.pastReorderPoint ? ' class="late"' : ""}>
+      <td><strong>${esc(f.name)}</strong></td>
+      <td class="loc">${esc(f.location ?? "—")}</td>
+      <td class="num">${esc(f.onHand)} <span class="loc">${esc(f.unit)}</span></td>
+      <td class="num">${f.burnPerDay == null ? '<span class="loc">—</span>' : esc(f.burnPerDay)}</td>
+      <td>${coverBar(f)}</td>
+      <td class="num loc">${f.orderBy
+          ? esc(new Date(f.orderBy).toISOString().slice(0, 10))
+          : f.pastReorderPoint ? '<span style="color:var(--dark)">overdue</span>' : "—"}</td>
+      <td class="num">${f.recommendedQuantity ? `${esc(f.recommendedQuantity)} <span class="loc">${esc(f.unit)}</span>` : '<span class="loc">—</span>'}</td>
+      <td><span class="pill ${CONF[f.confidence] ?? "idle"}">${esc(f.confidence)}</span>
+          ${f.note ? `<div class="why" style="margin-top:4px">${esc(f.note)}</div>` : ""}</td>
+    </tr>`).join("");
+}
+
+page({
+  current: "forecast.html",
+  ident: "resupply",
+  blurb: "Sign in to see what runs out, and when.",
+  onReady: refresh,
+  intervalMs: 30000,
+});
+</script>
+</body>
+</html>
