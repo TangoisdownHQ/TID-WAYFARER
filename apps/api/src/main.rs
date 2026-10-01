@@ -34,6 +34,7 @@ use tid_wayfarer::routes::{
     capsules::capsule_routes,
     compliance::compliance_routes,
     custody::custody_routes,
+    rates::rate_routes,
 };
 
 use tid_wayfarer::services::identity::load_or_generate_identity;
@@ -240,6 +241,7 @@ async fn main() -> Result<(), sqlx::Error> {
         .nest("/capsules", capsule_routes())
         .nest("/compliance", compliance_routes())
         .nest("/custody", custody_routes())
+        .nest("/rates", rate_routes())
         .nest("/fleet", fleet_asset_routes())
         .nest("/users", user_routes())
         .nest("/nodes", node_routes())
