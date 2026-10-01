@@ -13,6 +13,7 @@ pub mod actuators;
 pub mod dtn_crypto;
 pub mod settlement;
 pub mod custody;
+pub mod forecast;
 pub mod dtn;
 pub mod blockchain_feeder;
 

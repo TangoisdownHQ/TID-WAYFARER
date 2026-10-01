@@ -32,6 +32,7 @@ pub mod capsules;
 pub mod compliance;
 pub mod custody;
 pub mod rates;
+pub mod movements;
 
 // Re-export route functions
 pub use auth::auth_routes;
@@ -64,3 +65,4 @@ pub use capsules::capsule_routes;
 pub use compliance::compliance_routes;
 pub use custody::custody_routes;
 pub use rates::rate_routes;
+pub use movements::movement_routes;
