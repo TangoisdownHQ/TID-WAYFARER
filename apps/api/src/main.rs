@@ -38,6 +38,7 @@ use tid_wayfarer::routes::{
     movements::movement_routes,
     documents::document_routes,
     search::search_routes,
+    orgs::org_routes,
 };
 
 use tid_wayfarer::services::identity::load_or_generate_identity;
@@ -248,6 +249,7 @@ async fn main() -> Result<(), sqlx::Error> {
         .nest("/movements", movement_routes())
         .nest("/documents", document_routes())
         .nest("/search", search_routes())
+        .nest("/orgs", org_routes())
         .nest("/fleet", fleet_asset_routes())
         .nest("/users", user_routes())
         .nest("/nodes", node_routes())
