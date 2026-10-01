@@ -53,6 +53,12 @@ pub struct Order {
     pub max_price:          Option<Decimal>,
     pub status:             String,
     pub accepted_bid_id:    Option<Uuid>,
+    /// What this consignment weighs and displaces. Nullable: unknown is not
+    /// zero, and a capsule refuses to budget cargo it cannot measure.
+    #[serde(with = "rust_decimal::serde::float_option")]
+    pub mass_kg:            Option<Decimal>,
+    #[serde(with = "rust_decimal::serde::float_option")]
+    pub volume_m3:          Option<Decimal>,
     pub created_at:         DateTime<Utc>,
     pub updated_at:         DateTime<Utc>,
 }
@@ -73,6 +79,8 @@ pub struct NewOrder {
     pub delivery_address:   Option<String>,
     pub max_price:          Option<f64>,
     pub requester_outpost:  Option<Uuid>,
+    pub mass_kg:            Option<f64>,
+    pub volume_m3:          Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, sqlx::FromRow, Clone)]
@@ -271,12 +279,12 @@ pub async fn create_order(
             requester_id, requester_outpost, description, item_kind,
             target_part_number, target_meta, quantity, unit, needed_by,
             delivery_body_id, delivery_lat, delivery_lon, delivery_alt,
-            delivery_address, max_price
+            delivery_address, max_price, mass_kg, volume_m3
         ) VALUES (
             $1, $2, $3, $4,
             $5, COALESCE($6, '{}'::jsonb), COALESCE($7, 1), COALESCE($8, 'each'), $9,
             $10, $11, $12, $13,
-            $14, $15
+            $14, $15, $16, $17
         )
         RETURNING *
         "#,
@@ -296,6 +304,8 @@ pub async fn create_order(
     .bind(payload.delivery_alt)
     .bind(&payload.delivery_address)
     .bind(payload.max_price)
+    .bind(payload.mass_kg.and_then(|v| rust_decimal::Decimal::try_from(v).ok()))
+    .bind(payload.volume_m3.and_then(|v| rust_decimal::Decimal::try_from(v).ok()))
     .fetch_one(&state.db)
     .await
     .map_err(|e| {

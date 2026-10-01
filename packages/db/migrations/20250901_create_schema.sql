@@ -7,15 +7,24 @@
 -- ENUMS
 -- ==========================
 
--- Asset classification — core primitive
-CREATE TYPE asset_kind AS ENUM (
-    'node',         -- compute node, core HQ brain or outpost
-    'wallet',       -- crypto wallet as asset identity
-    'contract',     -- smart contract endpoint
-    'satellite',    -- orbital or high-alt asset
-    'fleet',        -- EV / UAV / robot / rover / ground unit
-    'ops'           -- control / ops systems / command interface
-);
+-- Asset classification — core primitive.
+--
+-- Guarded because migrations are applied on every container start: Postgres
+-- has no CREATE TYPE ... IF NOT EXISTS, so an unguarded one succeeds on a
+-- fresh database and fails on every existing one. Identical result either way.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'asset_kind') THEN
+        CREATE TYPE asset_kind AS ENUM (
+            'node',         -- compute node, core HQ brain or outpost
+            'wallet',       -- crypto wallet as asset identity
+            'contract',     -- smart contract endpoint
+            'satellite',    -- orbital or high-alt asset
+            'fleet',        -- EV / UAV / robot / rover / ground unit
+            'ops'           -- control / ops systems / command interface
+        );
+    END IF;
+END $$;
 
 -- ==========================
 -- USERS

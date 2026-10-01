@@ -51,6 +51,47 @@ services:
       - tidasone-net
 
 
+  # ==========================
+  # 🧱  Schema migration (one-shot)
+  # ==========================
+  # The API entrypoint waits for the database and starts — it never applied
+  # migrations, so a fresh `compose up` ran a new binary against an old schema
+  # and most routes 500'd on missing tables. The K8s path has a migrate Job;
+  # compose had nothing equivalent.
+  #
+  # Same image, so the migrations are the ones baked into the build. Every
+  # migration is written to be re-runnable (IF NOT EXISTS / ON CONFLICT /
+  # guarded constraints), so this is safe on every start.
+  tid-wayfarer-migrate:
+    image: tid-wayfarer:latest
+    build:
+      context: .
+      dockerfile: dockerfile
+    container_name: tid-wayfarer-migrate
+    restart: "no"
+
+    depends_on:
+      tidasone-db-v2:
+        condition: service_healthy
+
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-devpassword}@tidasone-db-v2:5432/tidasone
+
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        echo "applying migrations..."
+        for f in /app/migrations/*.sql; do
+          psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$$f" >/dev/null
+          echo "  ok $$(basename $$f)"
+        done
+        echo "schema up to date"
+
+    networks:
+      - tidasone-net
+
+
   # ======================
   # 🛰️  Core API Outpost
   # ======================
@@ -63,8 +104,8 @@ services:
     restart: unless-stopped
 
     depends_on:
-      tidasone-db-v2:
-        condition: service_healthy
+      tid-wayfarer-migrate:
+        condition: service_completed_successfully
 
     # Pulls the actual DB + API config from ./.env
     env_file:
@@ -159,8 +200,8 @@ services:
     restart: unless-stopped
 
     depends_on:
-      tidasone-db-v2:
-        condition: service_healthy
+      tid-wayfarer-migrate:
+        condition: service_completed_successfully
 
     environment:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-devpassword}@tidasone-db-v2:5432/tidasone
