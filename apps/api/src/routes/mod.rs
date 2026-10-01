@@ -33,6 +33,7 @@ pub mod compliance;
 pub mod custody;
 pub mod rates;
 pub mod movements;
+pub mod documents;
 
 // Re-export route functions
 pub use auth::auth_routes;
@@ -66,3 +67,4 @@ pub use compliance::compliance_routes;
 pub use custody::custody_routes;
 pub use rates::rate_routes;
 pub use movements::movement_routes;
+pub use documents::document_routes;
