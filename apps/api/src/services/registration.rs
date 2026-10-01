@@ -69,6 +69,9 @@ pub async fn run_registration(state: AppState) {
             // Ed25519 says who we are; ML-KEM says how to seal traffic for us.
             // One handshake carries both.
             "kem_public_key": kem_public_key,
+            // Where a browser can reach this outpost's console, which is not
+            // necessarily where peers reach its API.
+            "ui_url": std::env::var("UI_PUBLIC_URL").ok(),
         });
 
         let mut request = http.post(&url).json(&payload);

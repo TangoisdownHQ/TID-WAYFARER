@@ -41,6 +41,10 @@
 
   <div class="wrap">
 
+    <div id="fabricbar"></div>
+    <div id="searchbar"></div>
+
+
     <!-- The signature element: how stale is everything below this line. -->
     <div class="rail" id="rail">
       <div class="since" id="since">—</div>
@@ -117,7 +121,7 @@
 </div>
 
 <script type="module">
-import { api, boot, age, ageSince, freshness, el, setText, esc } from "/static/js/wayfarer.js";
+import { api, boot, age, ageSince, freshness, el, setText, esc , mountFabricBar, mountSearch } from "/static/js/wayfarer.js";
 
 /* A count of zero is good news for failures and bad news for nothing —
  * colour it by what it means, not by whether it is nonzero. */
@@ -258,7 +262,11 @@ el("tracego").addEventListener("click", async () => {
   }
 });
 
-boot(() => refresh().catch((e) => console.error(e)), 5000);
+boot(() => {
+  mountFabricBar();
+  mountSearch();
+  return refresh().catch((e) => console.error(e));
+}, 5000);
 </script>
 </body>
 </html>

@@ -34,6 +34,7 @@ pub mod custody;
 pub mod rates;
 pub mod movements;
 pub mod documents;
+pub mod search;
 
 // Re-export route functions
 pub use auth::auth_routes;
@@ -68,3 +69,4 @@ pub use custody::custody_routes;
 pub use rates::rate_routes;
 pub use movements::movement_routes;
 pub use documents::document_routes;
+pub use search::search_routes;

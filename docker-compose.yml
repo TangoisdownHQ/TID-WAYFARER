@@ -126,6 +126,9 @@ services:
       POSTGRES_PORT: 5432
 
       OUTPOST_NAME: TIDasONE-Core
+      # Where a browser reaches this console, as distinct from where peers
+      # reach the API. Container hostnames do not resolve for an operator.
+      UI_PUBLIC_URL: ${CORE_UI_URL:-http://localhost:4000}
       HOST: 0.0.0.0
       PORT: 3000
       JWT_SECRET: ${JWT_SECRET:-dev_jwt_secret_change_me}
@@ -178,6 +181,7 @@ services:
       OUTPOST_NAME: TIDasONE-Outpost-B
       CORE_API_URL: http://tid-wayfarer-core:3000/api/nodes/register
       API_ENDPOINT: http://tidasone-b-api:3000/api
+      UI_PUBLIC_URL: ${OUTPOST_B_UI_URL:-http://localhost:3001}
 
       HOST: 0.0.0.0
       PORT: 3000

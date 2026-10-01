@@ -116,6 +116,126 @@ export function showApp() {
   if (app) app.style.display = "block";
 }
 
+/* ---- Fabric bar ----------------------------------------------------------
+ * Which outpost you are signed in to, who else is in the fabric, and how to
+ * reach them. The console could report a count of online nodes but never said
+ * *which* or *where*, so an operator who needed the farm's console had no way
+ * to find it.
+ *
+ * Following a peer link lands on that outpost's own sign-in. Outposts are
+ * sovereign and hold their own user tables, so there is genuinely no shared
+ * session — the bar says so rather than letting a link imply otherwise. */
+
+const PEER_TONE = {
+  self: "ok", online: "ok", lagging: "wait", dark: "bad",
+  unknown: "unknown", revoked: "bad",
+};
+
+export async function mountFabricBar(hostId = "fabricbar") {
+  const host = el(hostId);
+  if (!host) return;
+  let f;
+  try {
+    f = await api("/fabric/outposts");
+  } catch {
+    host.innerHTML = "";               // never block a page on this
+    return;
+  }
+
+  const peers = f.peers.map((p) => {
+    const tone = PEER_TONE[p.status] ?? "idle";
+    const label = esc(p.name ?? p.nodeId.slice(0, 8));
+    const age = p.status === "self" ? "this outpost"
+      : p.ageSeconds == null ? "never heard from"
+      : `${age_(p.ageSeconds)} ago`;
+    const inner = `<span class="pill ${tone}">${p.status}</span>
+       <span class="peer-name">${label}</span>
+       <span class="peer-age">${esc(age)}</span>`;
+    return p.ui
+      ? `<a class="peer" href="${esc(p.ui)}" title="Sign in at ${label}">${inner}</a>`
+      : `<span class="peer current">${inner}</span>`;
+  }).join("");
+
+  host.innerHTML = `
+    <div class="fabricbar">
+      <span class="label">Fabric</span>
+      <span class="fabric-count">${f.online}/${f.total} reporting</span>
+      <div class="peers">${peers}</div>
+      <span class="fabric-note">${esc(f.note)}</span>
+    </div>`;
+}
+
+const age_ = (s) => age(s);
+
+/* ---- Search --------------------------------------------------------------
+ * One box over resources, lots and serials, orders, capsules and rates. A
+ * person hunting a lot code and a person hunting "oxygen" are asking the same
+ * question and should not have to know which table it lives in. */
+
+const KIND_LABEL = {
+  resource: "resource", lot: "lot / serial", order: "order",
+  capsule: "capsule", rate: "rate card",
+};
+
+export function mountSearch(hostId = "searchbar", { placeholder } = {}) {
+  const host = el(hostId);
+  if (!host) return;
+
+  host.innerHTML = `
+    <div class="searchwrap">
+      <input id="q" type="search" autocomplete="off" spellcheck="false"
+             placeholder="${esc(placeholder ?? "Search resources, lot codes, serials, orders, capsules…")}" />
+      <div class="searchresults" id="qresults" hidden></div>
+    </div>`;
+
+  const input = el("q");
+  const panel = el("qresults");
+  let timer = null;
+
+  const close = () => { panel.hidden = true; panel.innerHTML = ""; };
+
+  const run = async (term) => {
+    if (term.trim().length < 2) return close();
+    let r;
+    try {
+      r = await api(`/search?q=${encodeURIComponent(term.trim())}`);
+    } catch (e) {
+      panel.hidden = false;
+      panel.innerHTML = `<div class="searchempty">${esc(e.message)}</div>`;
+      return;
+    }
+    panel.hidden = false;
+    if (!r.count) {
+      panel.innerHTML = `<div class="searchempty">Nothing matches “${esc(term)}”.</div>`;
+      return;
+    }
+    panel.innerHTML = `
+      <div class="searchcount">${r.count} result${r.count === 1 ? "" : "s"}</div>
+      ${r.results.map((x) => `
+        <div class="hit${x.needsReorder || x.expired ? " flagged" : ""}">
+          <span class="hitkind">${esc(KIND_LABEL[x.kind] ?? x.kind)}</span>
+          <div class="hitbody">
+            <strong>${esc(x.title)}</strong>
+            ${x.subtitle ? `<span class="hitsub">${esc(x.subtitle)}</span>` : ""}
+          </div>
+          <span class="hitdetail">${esc(x.detail ?? "")}</span>
+          ${x.needsReorder ? `<span class="pill bad">reorder</span>` : ""}
+          ${x.expired ? `<span class="pill bad">expired</span>` : ""}
+        </div>`).join("")}`;
+  };
+
+  // Debounced: a keystroke per character would hammer an outpost that may be
+  // on a thin link.
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => run(input.value), 220);
+  });
+  input.addEventListener("keydown", (e) => { if (e.key === "Escape") { input.value = ""; close(); } });
+  document.addEventListener("click", (e) => {
+    if (!host.contains(e.target)) close();
+  });
+}
+
 /**
  * Wire the standard sign-in panel and start the page.
  * `onReady` runs once a token is present and is re-run on `intervalMs`.

@@ -25,6 +25,7 @@ pub struct NodeRegisterRequest {
     /// Optional: a node on an older build simply won't send one, and DTN
     /// falls back to plaintext for it rather than refusing to register it.
     pub kem_public_key: Option<String>,
+    pub ui_url: Option<String>,
 }
 
 /// Registration replay window (seconds of clock skew tolerated).
@@ -361,8 +362,8 @@ pub async fn register_node(
     // for the kem_public_key column and sqlx-cli isn't available to regenerate.
     let result = sqlx::query(
         r#"
-        INSERT INTO node_registry (node_id, name, api_endpoint, public_key, kem_public_key, last_seen)
-        VALUES ($1, $2, $3, $4, $5, NOW())
+        INSERT INTO node_registry (node_id, name, api_endpoint, public_key, kem_public_key, ui_url, last_seen)
+        VALUES ($1, $2, $3, $4, $5, $6, NOW())
         ON CONFLICT (node_id) DO UPDATE SET
             name = EXCLUDED.name,
             api_endpoint = EXCLUDED.api_endpoint,
@@ -370,6 +371,7 @@ pub async fn register_node(
             -- Keep the stored key if this registration omitted one, so an
             -- older-build heartbeat cannot erase a peer's ability to seal.
             kem_public_key = COALESCE(EXCLUDED.kem_public_key, node_registry.kem_public_key),
+            ui_url = COALESCE(EXCLUDED.ui_url, node_registry.ui_url),
             last_seen = NOW()
         "#,
     )
@@ -378,6 +380,7 @@ pub async fn register_node(
     .bind(&payload.api_endpoint)
     .bind(&payload.public_key)
     .bind(&payload.kem_public_key)
+    .bind(&payload.ui_url)
     .execute(&state.db)
     .await;
 

@@ -67,6 +67,10 @@
 
   <div class="wrap">
 
+    <div id="fabricbar"></div>
+    <div id="searchbar"></div>
+
+
     <!-- Completeness rail. Same idea as the console's time-since-contact rail:
          state up front whether the numbers below can be trusted, because a
          total assembled from some of the fabric looks identical to a total
@@ -164,7 +168,7 @@
 </dialog>
 
 <script type="module">
-import { api, el, esc, age, ageSince, setText, boot } from "/static/js/wayfarer.js";
+import { api, el, esc, age, ageSince, setText, boot , mountFabricBar, mountSearch } from "/static/js/wayfarer.js";
 
 const SOURCE_TONE = { local: "ok", ok: "ok", unreachable: "bad" };
 const SOURCE_WORD = { local: "this outpost", ok: "reporting", unreachable: "out of contact" };
@@ -342,7 +346,11 @@ el("ro-form").addEventListener("submit", async (e) => {
   }
 });
 
-boot(() => refresh().catch((e) => console.error(e)), 15000);
+boot(() => {
+  mountFabricBar();
+  mountSearch();
+  return refresh().catch((e) => console.error(e));
+}, 15000);
 </script>
 </body>
 </html>
