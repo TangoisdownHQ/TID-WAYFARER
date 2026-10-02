@@ -205,7 +205,7 @@ async fn a_compliance_hold_actually_blocks_a_shipment() {
     h.join(org, admin_id, "owner").await;
 
     // A destination that demands an export licence nothing holds.
-    let body = 900 + (rand_small() as i32);
+    let body = unique_body();
     let (status, _) = h
         .post("/api/compliance/requirements", &admin,
               json!({"destination_body_id": body, "required_kind": "export"}))
@@ -238,7 +238,7 @@ async fn an_override_survives_the_next_check() {
     let org = h.org("override-org").await;
     h.join(org, admin_id, "owner").await;
 
-    let body = 900 + (rand_small() as i32);
+    let body = unique_body();
     h.post("/api/compliance/requirements", &admin,
            json!({"destination_body_id": body, "required_kind": "hazmat"})).await;
 
@@ -274,7 +274,7 @@ async fn a_non_admin_cannot_override_a_compliance_hold() {
     let org = h.org("override-authz").await;
     h.join(org, admin_id, "owner").await;
 
-    let body = 900 + (rand_small() as i32);
+    let body = unique_body();
     h.post("/api/compliance/requirements", &admin,
            json!({"destination_body_id": body, "required_kind": "customs"})).await;
     let (_, order) = h.post("/api/orders", &admin, json!({
@@ -312,9 +312,27 @@ async fn stock_cannot_be_driven_negative() {
             "the refusal did not say what was actually on hand");
 }
 
-/// Small non-cryptographic spread so concurrent test runs pick different
-/// destination bodies and do not collide on the requirements unique index.
-fn rand_small() -> u8 {
+/// A destination body id no other test will use.
+///
+/// Compliance requirements are unique on (destination_body_id, item_category,
+/// required_kind), so two tests sharing a body share requirements — and a test
+/// that overrides its own hold then fails because it inherited someone else's.
+/// That is exactly what happened: the first version drew from a 90-value space
+/// and flaked roughly one run in three.
+///
+/// A per-process random base keeps concurrent `cargo test` invocations apart;
+/// the atomic counter keeps tests within a process apart. Body ids are i32, so
+/// there is no shortage.
+fn unique_body() -> i32 {
+    use std::sync::atomic::{AtomicI32, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
-    (SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos() % 90) as u8
+
+    static NEXT: AtomicI32 = AtomicI32::new(0);
+    static BASE: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+
+    let base = *BASE.get_or_init(|| {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos();
+        100_000 + (nanos % 1_000_000) as i32 * 100
+    });
+    base + NEXT.fetch_add(1, Ordering::Relaxed)
 }
