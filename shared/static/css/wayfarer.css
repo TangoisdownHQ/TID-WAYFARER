@@ -342,3 +342,36 @@ a.peer:hover { border-color: var(--signal); }
 }
 .orgchip.none { border-color: var(--unknown); color: var(--unknown); }
 .orgmore { color: var(--dim); font-family: var(--mono); font-size: 11px; font-weight: 400; }
+
+/* ---- Scanning ----------------------------------------------------------- */
+
+.scanbtn {
+  margin-top: 6px; padding: 6px 12px; font-size: 12px;
+  background: transparent; color: var(--signal);
+  border: 1px solid var(--edge-lit); border-radius: 7px; font-weight: 600;
+}
+.scanbtn:hover { border-color: var(--signal); filter: none; }
+
+.scanoverlay {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(3, 6, 10, .88);
+  display: flex; align-items: center; justify-content: center; padding: 20px;
+}
+.scanbox {
+  width: min(520px, 100%); background: var(--panel);
+  border: 1px solid var(--edge-lit); border-radius: var(--r); overflow: hidden;
+}
+.scanbox video { display: block; width: 100%; max-height: 62vh; background: #000; object-fit: cover; }
+/* A frame to aim with. Purely a target — detection reads the whole frame. */
+.scanframe {
+  position: relative; margin: -42% auto 0; width: 62%; height: 28%;
+  border: 2px solid var(--signal); border-radius: 8px; opacity: .8; pointer-events: none;
+}
+.scanfoot {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 15px; margin-top: calc(42% - 28%);
+  border-top: 1px solid var(--edge);
+}
+.scanstatus { font-family: var(--mono); font-size: 12.5px; color: var(--dim); }
+
+@media (prefers-reduced-motion: reduce) { .scanframe { opacity: .9; } }

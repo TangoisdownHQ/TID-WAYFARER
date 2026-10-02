@@ -40,6 +40,8 @@ pub fn lot_routes() -> Router<AppState> {
     Router::new()
         .route("/trace", get(trace))
         .route("/expiring", get(expiring))
+        .route("/life", get(life_remaining))
+        .route("/:id/usage", axum::routing::patch(update_usage))
         .route("/:id", get(get_lot).patch(update_lot))
         .route("/:id/quarantine", post(quarantine))
 }
@@ -502,4 +504,165 @@ mod tests {
             assert!(!ACTIONABLE.contains(&gone), "{gone} must not count as on hand");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Life limits
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct UsageUpdate {
+    pub cycles_used: Option<f64>,
+    pub hours_used: Option<f64>,
+    pub in_service_since: Option<DateTime<Utc>>,
+}
+
+/// PATCH /api/lots/:id/usage — record what a unit has actually done.
+///
+/// Usage accrues against the individual unit, which is the whole reason
+/// serialised parts exist: two motors from the same batch retire at different
+/// times because one flew twice as much.
+async fn update_usage(
+    State(state): State<AppState>,
+    _user: AuthenticatedUser,
+    Path(id): Path<Uuid>,
+    Json(b): Json<UsageUpdate>,
+) -> Result<Json<Value>, ApiError> {
+    for (name, v) in [("cycles_used", b.cycles_used), ("hours_used", b.hours_used)] {
+        if v.map_or(false, |x| x < 0.0) {
+            return Err((StatusCode::BAD_REQUEST, format!("{name} cannot be negative")));
+        }
+    }
+
+    let row = sqlx::query(
+        r#"
+        UPDATE inventory_lots SET
+          cycles_used      = COALESCE($2, cycles_used),
+          hours_used       = COALESCE($3, hours_used),
+          in_service_since = COALESCE($4, in_service_since),
+          updated_at       = NOW()
+        WHERE id = $1
+        RETURNING cycles_used, hours_used, in_service_since
+        "#,
+    )
+    .bind(id)
+    .bind(b.cycles_used.and_then(|v| Decimal::try_from(v).ok()))
+    .bind(b.hours_used.and_then(|v| Decimal::try_from(v).ok()))
+    .bind(b.in_service_since)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(server_err("usage update failed"))?
+    .ok_or((StatusCode::NOT_FOUND, "no such lot".to_string()))?;
+
+    Ok(Json(json!({
+        "lotId": id,
+        "cyclesUsed": row.get::<Decimal,_>("cycles_used").to_string(),
+        "hoursUsed": row.get::<Decimal,_>("hours_used").to_string(),
+        "inServiceSince": row.get::<Option<DateTime<Utc>>,_>("in_service_since"),
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct LifeQuery {
+    /// Report units at or past this fraction of any limit. Default 0.8.
+    pub at_pct: Option<f64>,
+}
+
+/// GET /api/lots/life?at_pct=0.8
+///
+/// Which units are approaching retirement, and on which clock.
+///
+/// Three limits can apply at once — cycles for a battery, hours for a motor,
+/// calendar time for a seal that ages on the shelf — and whichever is reached
+/// first retires the unit. So the figure reported is the *worst* of the three,
+/// named: telling an operator a motor is at 40% of its hours while it is at
+/// 98% of its cycles would be true and useless.
+async fn life_remaining(
+    State(state): State<AppState>,
+    _user: AuthenticatedUser,
+    Query(q): Query<LifeQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let at = q.at_pct.unwrap_or(0.8).clamp(0.0, 1.0);
+
+    let rows = sqlx::query(
+        r#"
+        SELECT l.id, l.serial, l.lot_code, l.status, l.cycles_used, l.hours_used,
+               l.in_service_since,
+               i.name, i.unit, i.location,
+               i.life_limit_cycles, i.life_limit_hours, i.life_limit_days
+        FROM inventory_lots l
+        JOIN inventory i ON i.id = l.inventory_id
+        WHERE l.status IN ('available','reserved')
+          AND (i.life_limit_cycles IS NOT NULL
+            OR i.life_limit_hours  IS NOT NULL
+            OR i.life_limit_days   IS NOT NULL)
+        "#,
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(server_err("life sweep failed"))?;
+
+    let now = Utc::now();
+    let f = |d: Option<Decimal>| d.and_then(|v| v.to_string().parse::<f64>().ok());
+
+    let mut out: Vec<Value> = Vec::new();
+    let mut expired = 0usize;
+
+    for r in &rows {
+        let cycles = f(r.get("cycles_used")).unwrap_or(0.0);
+        let hours = f(r.get("hours_used")).unwrap_or(0.0);
+        let since: Option<DateTime<Utc>> = r.get("in_service_since");
+        let days = since.map(|s| (now - s).num_days() as f64).unwrap_or(0.0);
+
+        // (fraction consumed, which clock) for each limit that applies.
+        let mut worst: Option<(f64, &'static str, f64, f64)> = None;
+        let mut consider = |used: f64, limit: Option<f64>, label: &'static str| {
+            if let Some(l) = limit.filter(|l| *l > 0.0) {
+                let frac = used / l;
+                if worst.map_or(true, |(w, _, _, _)| frac > w) {
+                    worst = Some((frac, label, used, l));
+                }
+            }
+        };
+        consider(cycles, f(r.get("life_limit_cycles")), "cycles");
+        consider(hours, f(r.get("life_limit_hours")), "hours");
+        consider(days, f(r.get("life_limit_days")), "days");
+
+        let Some((frac, clock, used, limit)) = worst else { continue };
+        if frac < at {
+            continue;
+        }
+        if frac >= 1.0 {
+            expired += 1;
+        }
+
+        out.push(json!({
+            "lotId": r.get::<Uuid,_>("id"),
+            "item": r.get::<String,_>("name"),
+            "serial": r.get::<Option<String>,_>("serial"),
+            "lotCode": r.get::<Option<String>,_>("lot_code"),
+            "location": r.get::<Option<String>,_>("location"),
+            "status": r.get::<String,_>("status"),
+            // The binding clock, not an average across three of them.
+            "limitedBy": clock,
+            "used": (used * 100.0).round() / 100.0,
+            "limit": limit,
+            "remaining": ((limit - used).max(0.0) * 100.0).round() / 100.0,
+            "percentUsed": (frac * 1000.0).round() / 10.0,
+            "pastLimit": frac >= 1.0,
+        }));
+    }
+
+    out.sort_by(|a, b| b["percentUsed"].as_f64().unwrap_or(0.0)
+        .partial_cmp(&a["percentUsed"].as_f64().unwrap_or(0.0))
+        .unwrap_or(std::cmp::Ordering::Equal));
+
+    Ok(Json(json!({
+        "atPercent": at * 100.0,
+        "count": out.len(),
+        // Past its limit and still marked usable: a present problem, the same
+        // split the expiry sweep makes.
+        "pastLimit": expired,
+        "units": out,
+    })))
 }

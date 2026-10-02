@@ -78,6 +78,10 @@ struct Consignment {
     lots: Vec<Value>,
     custody: Vec<Value>,
     certificates: Vec<Value>,
+    hs_code: Option<String>,
+    country_of_origin: Option<String>,
+    hazard_class: Option<String>,
+    un_number: Option<String>,
     /// Fields a document needs that the data could not supply.
     missing: Vec<String>,
 }
@@ -159,6 +163,22 @@ async fn gather(state: &AppState, order_id: Uuid) -> Result<Consignment, ApiErro
     .await
     .map_err(server_err("certificate lookup failed"))?;
 
+    // The customs fields live on the catalogue entry, matched the same way the
+    // certificates are: orders carry no inventory FK yet.
+    let customs = sqlx::query(
+        r#"
+        SELECT hs_code, country_of_origin, hazard_class, un_number
+        FROM inventory
+        WHERE name = (SELECT description FROM orders WHERE id = $1)
+           OR name = (SELECT target_meta->>'resource' FROM orders WHERE id = $1)
+        LIMIT 1
+        "#,
+    )
+    .bind(order_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(server_err("customs lookup failed"))?;
+
     let mass: Option<Decimal> = o.get("mass_kg");
     let volume: Option<Decimal> = o.get("volume_m3");
     let shipper: Option<String> = o.get("shipper");
@@ -173,6 +193,12 @@ async fn gather(state: &AppState, order_id: Uuid) -> Result<Consignment, ApiErro
     if address.is_none() { missing.push("delivery address".into()); }
     if price.is_none() { missing.push("declared value (no accepted bid)".into()); }
     if custody.is_empty() { missing.push("custody chain".into()); }
+    // A border asks for these two by name, so their absence is a gap in the
+    // document rather than a detail.
+    let hs: Option<String> = customs.as_ref().and_then(|c| c.get("hs_code"));
+    let origin: Option<String> = customs.as_ref().and_then(|c| c.get("country_of_origin"));
+    if hs.is_none() { missing.push("HS tariff code".into()); }
+    if origin.is_none() { missing.push("country of origin".into()); }
 
     Ok(Consignment {
         order_id,
@@ -213,6 +239,10 @@ async fn gather(state: &AppState, order_id: Uuid) -> Result<Consignment, ApiErro
             "identifier": c.get::<Option<String>, _>("identifier"),
             "expiresAt": c.get::<Option<DateTime<Utc>>, _>("expires_at"),
         })).collect(),
+        hs_code: hs,
+        country_of_origin: origin,
+        hazard_class: customs.as_ref().and_then(|c| c.get("hazard_class")),
+        un_number: customs.as_ref().and_then(|c| c.get("un_number")),
         missing,
     })
 }
@@ -403,6 +433,10 @@ async fn customs_declaration(
                        "unit": c.unit, "grossMassKg": c.mass_kg.map(|m| m.to_string()) },
             "declaredValue": c.price.map(|p| p.to_string()),
             "currency": "TIDAT",
+            "hsCode": c.hs_code,
+            "countryOfOrigin": c.country_of_origin,
+            "hazardClass": c.hazard_class,
+            "unNumber": c.un_number,
             "certificates": c.certificates,
         }),
         |c| {
@@ -415,6 +449,12 @@ async fn customs_declaration(
             s.push_str(&format!("\nGOODS DECLARED\n{}\n", "-".repeat(60)));
             s.push_str(&format!("{} — {} {}\n", c.description, c.quantity, c.unit));
             s.push_str(&format!("Gross mass       {} kg\n", d(c.mass_kg)));
+            s.push_str(&format!("HS tariff code   {}\n", or_blank(c.hs_code.as_deref())));
+            s.push_str(&format!("Origin           {}\n", or_blank(c.country_of_origin.as_deref())));
+            if c.hazard_class.is_some() || c.un_number.is_some() {
+                s.push_str(&format!("Hazard           class {} · {}\n",
+                    or_blank(c.hazard_class.as_deref()), or_blank(c.un_number.as_deref())));
+            }
             s.push_str(&format!("Declared value   {} TIDAT\n", d(c.price)));
             s.push_str(&format!("\nLICENCES AND CERTIFICATES RELIED ON\n{}\n", "-".repeat(60)));
             if c.certificates.is_empty() {

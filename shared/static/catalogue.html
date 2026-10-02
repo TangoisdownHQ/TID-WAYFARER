@@ -51,6 +51,21 @@
     <div id="fabricbar"></div>
     <div id="searchbar"></div>
 
+    <!-- Scanning first: someone standing at a shelf with a scanner is the
+         commonest way this page gets used, and making them find a field
+         afterwards is how scanning ends up slower than typing. -->
+    <div class="card" style="margin-bottom:18px">
+      <div class="row" style="grid-template-columns:1fr auto;gap:12px;align-items:end">
+        <label class="field" style="margin:0"><span class="label">Scan or type any code</span>
+          <input id="scan" class="mono" autocomplete="off" spellcheck="false"
+                 placeholder="barcode · part number · lot code · serial" />
+          <span class="hint">A hardware scanner works straight into this field. Any kind of
+            code resolves — you do not have to say which it is.</span></label>
+        <button type="button" id="scango">Find</button>
+      </div>
+      <div id="scanout"></div>
+    </div>
+
     <div class="sectionhead" style="margin-top:0">
       <h2>Catalogue</h2>
       <span><span class="label" id="count">—</span>
@@ -152,6 +167,57 @@
       </fieldset>
 
       <fieldset>
+        <legend>Life limit</legend>
+        <p class="muted" style="margin:0 0 10px;font-size:12.5px">
+          For a part retired by use rather than by date. All three can apply at
+          once and whichever is reached first retires the unit, so usage is
+          tracked per serial — two motors from one batch retire at different
+          times because one flew twice as much.
+        </p>
+        <div class="row">
+          <label class="field"><span class="label">Cycles</span>
+            <input id="f-lcycles" type="number" step="any" min="0" placeholder="3000" /></label>
+          <label class="field"><span class="label">Hours</span>
+            <input id="f-lhours" type="number" step="any" min="0" placeholder="2000" /></label>
+          <label class="field"><span class="label">Calendar days</span>
+            <input id="f-ldays" type="number" step="any" min="0" placeholder="1825" /></label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Customs</legend>
+        <div class="row">
+          <label class="field"><span class="label">HS tariff code</span>
+            <input id="f-hs" class="mono" placeholder="8501.31" />
+            <span class="hint">Printed on the customs declaration. A border asks for this by name.</span></label>
+          <label class="field"><span class="label">Country of origin</span>
+            <input id="f-origin" class="mono" maxlength="2" placeholder="CN" />
+            <span class="hint">ISO two-letter code.</span></label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Storage and hazard</legend>
+        <div class="row">
+          <label class="field"><span class="label">Min temp (°C)</span>
+            <input id="f-tmin" type="number" step="any" placeholder="-20" /></label>
+          <label class="field"><span class="label">Max temp (°C)</span>
+            <input id="f-tmax" type="number" step="any" placeholder="45" /></label>
+          <label class="field"><span class="label">Max humidity (%)</span>
+            <input id="f-humid" type="number" step="any" min="0" max="100" placeholder="60" /></label>
+        </div>
+        <div class="row">
+          <label class="field"><span class="label">Hazard class</span>
+            <input id="f-hazard" class="mono" placeholder="9" /></label>
+          <label class="field"><span class="label">UN number</span>
+            <input id="f-un" class="mono" placeholder="UN3480" />
+            <span class="hint">Lithium cells are UN3480/3481; it decides what this may travel beside.</span></label>
+        </div>
+        <label class="field"><span class="label">Storage notes</span>
+          <input id="f-storenotes" placeholder="Store at 30–50% charge. Keep upright." /></label>
+      </fieldset>
+
+      <fieldset>
         <legend>Specification</legend>
         <p class="muted" style="margin:0 0 10px;font-size:12.5px">
           Attributes that matter for this kind of part. Voltage and cycles for a
@@ -160,6 +226,12 @@
         </p>
         <div id="specs"></div>
         <button type="button" class="ghost" id="addspec">Add attribute</button>
+      </fieldset>
+
+      <fieldset id="related" style="display:none">
+        <legend>Sourcing and supersession</legend>
+        <div id="suppliers"></div>
+        <div id="relations" style="margin-top:14px"></div>
       </fieldset>
 
       <div class="err" id="err"></div>
@@ -173,7 +245,7 @@
 </dialog>
 
 <script type="module">
-import { api, el, esc, setText, page } from "/static/js/wayfarer.js";
+import { api, el, esc, setText, page, makeScannable } from "/static/js/wayfarer.js";
 
 let editingId = null;
 
@@ -221,6 +293,13 @@ function openForm(entry) {
   set("f-lead", entry?.lead_time_days); set("f-mass", entry?.unit_mass_kg);
   set("f-vol", entry?.unit_volume_m3); set("f-shelf", entry?.shelf_life_days);
   set("f-datasheet", entry?.datasheet_url);
+  set("f-lcycles", entry?.life_limit_cycles); set("f-lhours", entry?.life_limit_hours);
+  set("f-ldays", entry?.life_limit_days);
+  set("f-hs", entry?.hs_code); set("f-origin", entry?.country_of_origin);
+  set("f-tmin", entry?.storage_temp_min_c); set("f-tmax", entry?.storage_temp_max_c);
+  set("f-humid", entry?.storage_humidity_max_pct);
+  set("f-hazard", entry?.hazard_class); set("f-un", entry?.un_number);
+  set("f-storenotes", entry?.storage_notes);
   el("f-serial").checked = !!entry?.serialised;
 
   // Quantity is set once at registration; afterwards it moves through the
@@ -236,10 +315,111 @@ function openForm(entry) {
   else specs.appendChild(specRow());
 
   el("err").textContent = "";
+  el("related").style.display = entry ? "" : "none";
+  if (entry) loadRelated(entry).catch((e) => console.error(e));
   el("dlg").showModal();
 }
 
+/* Sourcing and supersession only exist once a part does, so they load on edit
+ * rather than cluttering registration with relationships to nothing. */
+async function loadRelated(entry) {
+  const [sup, rel] = await Promise.all([
+    api(`/catalogue/${entry.id}/suppliers`).catch(() => []),
+    api(`/catalogue/${entry.id}/relations`).catch(() => null),
+  ]);
+
+  el("suppliers").innerHTML = `
+    <span class="label" style="display:block;margin-bottom:8px">Suppliers</span>
+    ${sup.length ? `<div class="tablewrap" style="margin-bottom:10px"><table>
+        <thead><tr><th>Supplier</th><th>Their code</th><th class="num">MOQ</th>
+          <th class="num">Unit cost</th><th class="num">Lead</th><th></th></tr></thead>
+        <tbody>${sup.map((x) => `<tr>
+          <td>${esc(x.supplier)}${x.preferred ? ' <span class="pill ok">preferred</span>' : ""}</td>
+          <td class="mono">${esc(x.supplierPartNumber ?? "—")}</td>
+          <td class="num">${esc(x.minimumOrderQty ?? "—")}</td>
+          <td class="num">${x.unitCost ? `${esc(x.unitCost)} ${esc(x.currency)}` : "—"}</td>
+          <td class="num">${x.leadTimeDays ? `${esc(x.leadTimeDays)} d` : "—"}</td>
+          <td class="loc">${x.minimumSpend ? `min spend ${esc(x.minimumSpend)}` : ""}</td>
+        </tr>`).join("")}</tbody></table></div>`
+      : `<p class="muted" style="font-size:12.5px;margin:0 0 10px">
+           No sources recorded. Without one, a reorder cannot say what it will cost.</p>`}
+    <div class="row" style="grid-template-columns:1.2fr 1fr .7fr .7fr .7fr auto;gap:9px;align-items:end">
+      <label class="field" style="margin:0"><span class="label">Supplier</span>
+        <input id="s-name" placeholder="Digi-Key" /></label>
+      <label class="field" style="margin:0"><span class="label">Their code</span>
+        <input id="s-code" class="mono" placeholder="1528-4321-ND" /></label>
+      <label class="field" style="margin:0"><span class="label">MOQ</span>
+        <input id="s-moq" type="number" step="any" min="0" /></label>
+      <label class="field" style="margin:0"><span class="label">Unit cost</span>
+        <input id="s-cost" type="number" step="any" min="0" /></label>
+      <label class="field" style="margin:0"><span class="label">Lead (d)</span>
+        <input id="s-lead" type="number" step="any" min="0" /></label>
+      <button type="button" class="ghost" id="s-add">Add</button>
+    </div>
+    <div class="check" style="margin-top:8px">
+      <input id="s-pref" type="checkbox" />
+      <label for="s-pref" style="font-size:12.5px">Reorder from this source by default</label>
+    </div>`;
+
+  el("s-add").addEventListener("click", async () => {
+    const name = el("s-name").value.trim();
+    if (!name) return;
+    try {
+      await api(`/catalogue/${entry.id}/suppliers`, { method: "POST", body: JSON.stringify({
+        supplier_name: name, supplier_part_number: el("s-code").value.trim() || null,
+        minimum_order_qty: el("s-moq").value ? Number(el("s-moq").value) : null,
+        unit_cost: el("s-cost").value ? Number(el("s-cost").value) : null,
+        lead_time_days: el("s-lead").value ? Number(el("s-lead").value) : null,
+        preferred: el("s-pref").checked,
+      })});
+      await loadRelated(entry);
+    } catch (e) { alert(e.message); }
+  });
+
+  const brief = (p) => `${esc(p.name)}${p.partNumber ? ` <span class="mono">${esc(p.partNumber)}</span>` : ""}`;
+  el("relations").innerHTML = `
+    <span class="label" style="display:block;margin-bottom:8px">Supersession</span>
+    ${rel?.obsolete
+      ? `<div class="item critical" style="margin-bottom:10px"><span class="count">!</span>
+           <span class="body"><strong>Superseded</strong>
+           <span>Order ${brief(rel.currentPart)} instead. Ordering this number will not be filled.</span></span></div>`
+      : `<p class="muted" style="font-size:12.5px;margin:0 0 10px">Current — not superseded.</p>`}
+    ${rel?.replaces?.length ? `<p class="muted" style="font-size:12.5px;margin:0 0 10px">
+        Replaces ${rel.replaces.map(brief).join(", ")}.</p>` : ""}
+    ${rel?.alternates?.length ? `<p class="muted" style="font-size:12.5px;margin:0 0 10px">
+        Interchangeable with ${rel.alternates.map(brief).join(", ")}.</p>` : ""}
+    <div class="row" style="grid-template-columns:1.6fr 1fr auto;gap:9px;align-items:end">
+      <label class="field" style="margin:0"><span class="label">Related part</span>
+        <select id="r-to"></select></label>
+      <label class="field" style="margin:0"><span class="label">Relationship</span>
+        <select id="r-kind">
+          <option value="supersedes">is replaced by</option>
+          <option value="alternate">is interchangeable with</option>
+        </select></label>
+      <button type="button" class="ghost" id="r-add">Link</button>
+    </div>`;
+
+  // Candidates are everything else in the catalogue.
+  const all = await api("/catalogue");
+  el("r-to").innerHTML = all.filter((x) => x.id !== entry.id)
+    .map((x) => `<option value="${esc(x.id)}">${esc(x.name)}${x.part_number ? ` · ${esc(x.part_number)}` : ""}</option>`)
+    .join("");
+
+  el("r-add").addEventListener("click", async () => {
+    try {
+      await api(`/catalogue/${entry.id}/relations`, { method: "POST", body: JSON.stringify({
+        to_id: el("r-to").value, kind: el("r-kind").value,
+      })});
+      await loadRelated(entry);
+    } catch (e) { alert(e.message); }
+  });
+}
+
 el("add").addEventListener("click", () => openForm(null));
+
+// The barcode field is itself scannable, so registering a part means pointing
+// at its label rather than reading digits off it.
+makeScannable(el("f-barcode"), (code) => { el("f-barcode").value = code; });
 el("cancel").addEventListener("click", () => el("dlg").close());
 
 el("form").addEventListener("submit", async (e) => {
@@ -257,6 +437,12 @@ el("form").addEventListener("submit", async (e) => {
     serialised: el("f-serial").checked,
     shelf_life_days: num("f-shelf"), unit_mass_kg: num("f-mass"),
     unit_volume_m3: num("f-vol"), lead_time_days: num("f-lead"),
+    life_limit_cycles: num("f-lcycles"), life_limit_hours: num("f-lhours"),
+    life_limit_days: num("f-ldays"),
+    hs_code: str("f-hs"), country_of_origin: str("f-origin"),
+    storage_temp_min_c: num("f-tmin"), storage_temp_max_c: num("f-tmax"),
+    storage_humidity_max_pct: num("f-humid"),
+    hazard_class: str("f-hazard"), un_number: str("f-un"), storage_notes: str("f-storenotes"),
   };
   if (!editingId) body.quantity = num("f-qty") ?? 0;
 
@@ -272,6 +458,76 @@ el("form").addEventListener("submit", async (e) => {
   } finally {
     btn.disabled = false;
   }
+});
+
+/* ---- Scanning ----
+ * One field, any code. The response says which kind it matched, because
+ * "serial MN2814-00417" and "part number T-MOTOR-2814-880" lead to different
+ * next actions even though the same gesture produced them. */
+
+const MATCH_LABEL = {
+  serial: "serial — one specific unit",
+  lot: "lot code — a batch",
+  barcode: "barcode",
+  part_number: "part number",
+};
+
+async function resolveCode(code) {
+  const out = el("scanout");
+  if (!code || !code.trim()) { out.innerHTML = ""; return; }
+
+  let r;
+  try { r = await api(`/catalogue/lookup?code=${encodeURIComponent(code.trim())}`); }
+  catch (e) { out.innerHTML = `<div class="allclear" style="margin-top:14px">${esc(e.message)}</div>`; return; }
+
+  if (!r.matched) {
+    // Not a failure — at a shelf the useful next step is registering it.
+    out.innerHTML = `
+      <div class="allclear" style="margin-top:14px">
+        Nothing carries <span class="mono">${esc(r.code)}</span> yet.
+        <button type="button" class="linkish" id="scan-register"
+                style="color:var(--signal);margin-left:8px">Register it</button>
+      </div>`;
+    el("scan-register").addEventListener("click", () => {
+      openForm(null);
+      el("f-barcode").value = r.code;   // pre-filled from what was scanned
+      el("f-name").focus();
+    });
+    return;
+  }
+
+  const res = r.resource;
+  const unit = r.unit;
+  out.innerHTML = `
+    <div class="item ${unit && unit.status !== "available" ? "warn" : "info"}" style="margin-top:14px">
+      <span class="count">✓</span>
+      <span class="body">
+        <strong>${esc(res.name)}</strong>
+        <span>${esc(MATCH_LABEL[r.matched] ?? r.matched)} ·
+          ${res.partNumber ? `<span class="mono">${esc(res.partNumber)}</span> · ` : ""}
+          ${esc(res.location ?? "no location")}</span>
+        ${unit ? `<span style="display:block;margin-top:4px">
+            <span class="pill ${unit.status === "available" ? "ok" : unit.status === "quarantined" ? "bad" : "wait"}">${esc(unit.status)}</span>
+            ${unit.supplier ? ` <span class="loc">${esc(unit.supplier)}</span>` : ""}
+            ${unit.expiresAt ? ` <span class="loc">expires ${esc(new Date(unit.expiresAt).toISOString().slice(0,10))}</span>` : ""}
+          </span>` : ""}
+        ${r.lots ? `<span style="display:block;margin-top:4px" class="loc">${r.lots.length} lot(s) under this code</span>` : ""}
+      </span>
+      <button type="button" class="linkish" id="scan-open" style="color:var(--signal)">Open</button>
+    </div>`;
+
+  el("scan-open").addEventListener("click", async () => {
+    const full = await api(`/catalogue/${res.id}`);
+    openForm(full.resource);
+  });
+}
+
+makeScannable(el("scan"), resolveCode);
+el("scango").addEventListener("click", () => resolveCode(el("scan").value));
+el("scan").addEventListener("keydown", (e) => {
+  // A person typing and pressing Enter should also search; the scanner path
+  // already intercepted the machine-speed case.
+  if (e.key === "Enter") { e.preventDefault(); resolveCode(el("scan").value); }
 });
 
 /* ---- List ---- */

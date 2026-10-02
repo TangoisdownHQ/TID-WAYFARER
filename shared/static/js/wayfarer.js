@@ -116,6 +116,164 @@ export function showApp() {
   if (app) app.style.display = "block";
 }
 
+
+/* ---- Scanning -------------------------------------------------------------
+ * Two ways a code gets in, and the first matters more than people expect.
+ *
+ * Most real warehouse scanning is a USB or Bluetooth scanner that presents as
+ * a keyboard: it types the code and presses Enter, faster than a human can.
+ * That needs no camera permission, no library, and works on a machine with no
+ * camera at all — so it is handled first, by watching for a burst of keystrokes
+ * ending in Enter.
+ *
+ * Phone cameras use the browser's own BarcodeDetector where it exists. It is
+ * deliberately not polyfilled: a scanning library is hundreds of kilobytes an
+ * offline outpost would have to carry, and the hardware-scanner path already
+ * covers the case that matters most. Where the API is absent the button simply
+ * is not offered, and typing still works.
+ */
+
+/** A hardware scanner types much faster than a person. */
+const SCANNER_MAX_GAP_MS = 35;
+const SCANNER_MIN_LENGTH = 4;
+
+export const canScanWithCamera = () => "BarcodeDetector" in window;
+
+/**
+ * Watch an input for hardware-scanner input.
+ *
+ * Returns a detach function. `onScan` fires only for a burst that looks
+ * machine-typed, so a person typing a code by hand and pressing Enter still
+ * submits the form normally rather than being hijacked.
+ */
+export function watchForScanner(input, onScan) {
+  let last = 0;
+  let fast = 0;
+
+  const onKey = (e) => {
+    const now = performance.now();
+    const gap = now - last;
+    last = now;
+
+    if (e.key === "Enter") {
+      const value = input.value.trim();
+      // Only treat it as a scan if most of it arrived at machine speed.
+      if (value.length >= SCANNER_MIN_LENGTH && fast >= value.length - 2) {
+        e.preventDefault();
+        fast = 0;
+        onScan(value);
+      }
+      fast = 0;
+      return;
+    }
+    if (e.key.length === 1) fast = gap < SCANNER_MAX_GAP_MS ? fast + 1 : 0;
+  };
+
+  input.addEventListener("keydown", onKey);
+  return () => input.removeEventListener("keydown", onKey);
+}
+
+/**
+ * Open the camera and resolve the first code seen.
+ *
+ * The stream is stopped on every exit path — a camera left running is both a
+ * battery drain and a light nobody can explain.
+ */
+export async function scanWithCamera({ onStatus } = {}) {
+  if (!canScanWithCamera()) throw new Error("This browser cannot scan with the camera.");
+
+  const detector = new window.BarcodeDetector({
+    formats: ["qr_code", "code_128", "code_39", "ean_13", "ean_8", "upc_a", "upc_e", "data_matrix"],
+  });
+
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment" },   // the back camera, on a phone
+    });
+  } catch {
+    throw new Error("Camera access was refused.");
+  }
+
+  const overlay = document.createElement("div");
+  overlay.className = "scanoverlay";
+  overlay.innerHTML = `
+    <div class="scanbox">
+      <video playsinline muted></video>
+      <div class="scanframe"></div>
+      <div class="scanfoot">
+        <span class="scanstatus">Point the camera at a code</span>
+        <button type="button" class="ghost scancancel">Cancel</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  const video = overlay.querySelector("video");
+  video.srcObject = stream;
+  await video.play().catch(() => {});
+
+  const status = (t) => {
+    overlay.querySelector(".scanstatus").textContent = t;
+    onStatus?.(t);
+  };
+
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const finish = (fn, arg) => {
+      if (done) return;
+      done = true;
+      stream.getTracks().forEach((t) => t.stop());
+      overlay.remove();
+      fn(arg);
+    };
+
+    overlay.querySelector(".scancancel").addEventListener("click", () => finish(resolve, null));
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) finish(resolve, null); });
+
+    const tick = async () => {
+      if (done) return;
+      try {
+        const found = await detector.detect(video);
+        if (found.length) {
+          status(`Read ${found[0].rawValue}`);
+          return finish(resolve, found[0].rawValue);
+        }
+      } catch {
+        // A detect() failure on one frame is normal while focusing.
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+
+    // Give up rather than hold the camera open indefinitely.
+    setTimeout(() => finish(reject, new Error("No code was read.")), 45000);
+  });
+}
+
+/**
+ * Turn an input into a scan field: hardware scanner, a camera button where
+ * supported, and typing. `onCode` receives the code however it arrived.
+ */
+export function makeScannable(input, onCode) {
+  watchForScanner(input, onCode);
+
+  if (!canScanWithCamera()) return;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "scanbtn";
+  btn.title = "Scan with the camera";
+  btn.textContent = "Scan";
+  input.insertAdjacentElement("afterend", btn);
+  btn.addEventListener("click", async () => {
+    try {
+      const code = await scanWithCamera();
+      if (code) { input.value = code; onCode(code); }
+    } catch (e) {
+      alert(e.message);
+    }
+  });
+}
+
 /* ---- Navigation ----------------------------------------------------------
  * One list, so a new page cannot be added and then be unreachable — which is
  * how map.html and bodies-map.html ended up orphaned. Order follows the
