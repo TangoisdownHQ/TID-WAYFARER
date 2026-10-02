@@ -7,7 +7,8 @@ use axum::{
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::routes::auth_middleware::AuthenticatedUser;
+use crate::routes::auth_middleware::{AuthenticatedUser, Caller};
+use crate::services::org_scope;
 use crate::routes::auth_middleware::Claims;
 use crate::services::settlement::is_plausible_solana_address;
 use crate::AppState;
@@ -44,14 +45,33 @@ pub struct ProfileResponse {
     /// settlement, so the marketplace refuses to record one. Surfacing it here
     /// lets the UI prompt before that happens rather than after.
     pub needs_payout_wallet: bool,
+    /// The organisation this caller is currently acting for. Every read of
+    /// business data is filtered by it, so a user who cannot see it cannot
+    /// explain why a page is empty.
+    pub org_id: Option<Uuid>,
+    pub org_name: Option<String>,
+    /// How many organisations this person belongs to. More than one means the
+    /// resolved org is the earliest they joined, which is deterministic but
+    /// worth saying out loud rather than leaving them to guess.
+    pub org_count: i64,
 }
 
 /// GET /api/me/profile
 async fn get_profile(
     State(state): State<AppState>,
     AuthenticatedUser(claims): AuthenticatedUser,
+    Caller(principal): Caller,
 ) -> Result<Json<ProfileResponse>, (StatusCode, String)> {
     let user_id = uid(&claims)?;
+
+    let org_id = org_scope::caller_org(&state, &principal).await;
+    let org_name: Option<String> = match org_id {
+        Some(id) => sqlx::query_scalar("SELECT name FROM organisations WHERE id = $1")
+            .bind(id).fetch_optional(&state.db).await.ok().flatten(),
+        None => None,
+    };
+    let org_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM org_members WHERE user_id = $1")
+        .bind(user_id).fetch_one(&state.db).await.unwrap_or(0);
 
     let row = sqlx::query(
         "SELECT username, email, role, account_type, wallet_address FROM users WHERE id = $1",
@@ -77,6 +97,9 @@ async fn get_profile(
             && wallet_address.is_none(),
         account_type,
         wallet_address,
+        org_id,
+        org_name,
+        org_count,
     }))
 }
 

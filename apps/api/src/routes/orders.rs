@@ -23,7 +23,9 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::services::settlement;
-use crate::{routes::auth_middleware::AuthenticatedUser, AppState};
+use crate::services::org_scope;
+use crate::routes::auth_middleware::{AuthenticatedUser, Caller};
+use crate::AppState;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -268,10 +270,14 @@ pub async fn list_orders(
 
 pub async fn create_order(
     AuthenticatedUser(user): AuthenticatedUser,
+    Caller(principal): Caller,
     State(state): State<AppState>,
     Json(payload): Json<NewOrder>,
 ) -> Result<Json<Order>, StatusCode> {
     let user_id = parse_uid(&user.sub)?;
+    // Stamped at creation. A row with no org is invisible to every caller,
+    // including the person who just made it, so this must not be skipped.
+    let org = org_scope::caller_org(&state, &principal).await;
 
     let order = sqlx::query_as::<_, Order>(
         r#"
@@ -279,12 +285,12 @@ pub async fn create_order(
             requester_id, requester_outpost, description, item_kind,
             target_part_number, target_meta, quantity, unit, needed_by,
             delivery_body_id, delivery_lat, delivery_lon, delivery_alt,
-            delivery_address, max_price, mass_kg, volume_m3
+            delivery_address, max_price, mass_kg, volume_m3, org_id
         ) VALUES (
             $1, $2, $3, $4,
             $5, COALESCE($6, '{}'::jsonb), COALESCE($7, 1), COALESCE($8, 'each'), $9,
             $10, $11, $12, $13,
-            $14, $15, $16, $17
+            $14, $15, $16, $17, $18
         )
         RETURNING *
         "#,
@@ -306,6 +312,7 @@ pub async fn create_order(
     .bind(payload.max_price)
     .bind(payload.mass_kg.and_then(|v| rust_decimal::Decimal::try_from(v).ok()))
     .bind(payload.volume_m3.and_then(|v| rust_decimal::Decimal::try_from(v).ok()))
+    .bind(org)
     .fetch_one(&state.db)
     .await
     .map_err(|e| {

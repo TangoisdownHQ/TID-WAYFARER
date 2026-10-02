@@ -3074,6 +3074,7 @@ dependencies = [
  "hex",
  "hkdf",
  "hmac",
+ "http-body-util",
  "jsonwebtoken",
  "oauth2",
  "pqcrypto-mldsa",

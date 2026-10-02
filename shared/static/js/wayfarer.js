@@ -187,10 +187,30 @@ export async function mountFabricBar(hostId = "fabricbar") {
       : `<span class="peer current">${inner}</span>`;
   }).join("");
 
+  // Which organisation the page is showing. Every read of business data is
+  // filtered by it, so without this an empty page looks like a broken one.
+  let orgChip = "";
+  try {
+    const me = await api("/me/profile");
+    if (me.org_name) {
+      orgChip = `<span class="orgchip" title="${
+        me.org_count > 1
+          ? `You belong to ${me.org_count} organisations; this is the one being shown`
+          : "All data on this page belongs to this organisation"}">
+        <span class="label">Org</span> ${esc(me.org_name)}${
+        me.org_count > 1 ? ` <span class="orgmore">+${me.org_count - 1}</span>` : ""}</span>`;
+    } else {
+      // Fails closed, so say so rather than leaving an unexplained empty page.
+      orgChip = `<span class="orgchip none" title="You are not a member of any organisation, so no business data is visible">
+        <span class="label">Org</span> none</span>`;
+    }
+  } catch { /* older core */ }
+
   host.innerHTML = `
     <div class="fabricbar">
       <span class="label">Fabric</span>
       <span class="fabric-count">${f.online}/${f.total} reporting</span>
+      ${orgChip}
       <div class="peers">${peers}</div>
       <span class="fabric-note">${esc(f.note)}</span>
     </div>`;

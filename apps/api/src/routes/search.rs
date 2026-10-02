@@ -23,7 +23,8 @@ use serde_json::{json, Value};
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::routes::auth_middleware::AuthenticatedUser;
+use crate::routes::auth_middleware::{AuthenticatedUser, Caller};
+use crate::services::org_scope;
 use crate::AppState;
 
 type ApiError = (StatusCode, String);
@@ -51,8 +52,12 @@ pub struct SearchQuery {
 async fn search(
     State(state): State<AppState>,
     _user: AuthenticatedUser,
+    Caller(principal): Caller,
     Query(sq): Query<SearchQuery>,
 ) -> Result<Json<Value>, ApiError> {
+    // Fails closed: a caller whose organisation cannot be established searches
+    // nothing rather than searching everything.
+    let org = org_scope::caller_org(&state, &principal).await;
     let term = sq.q.trim();
     if term.len() < 2 {
         return Err((
@@ -74,14 +79,16 @@ async fn search(
             r#"
             SELECT id, name, description, category, location, unit, quantity, threshold
             FROM inventory
-            WHERE name ILIKE $1 OR description ILIKE $1
-               OR category ILIKE $1 OR location ILIKE $1
+            WHERE org_id IS NOT DISTINCT FROM $3
+              AND (name ILIKE $1 OR description ILIKE $1
+                OR category ILIKE $1 OR location ILIKE $1)
             ORDER BY (quantity <= threshold) DESC, name
             LIMIT $2
             "#,
         )
         .bind(&pattern)
         .bind(limit)
+        .bind(org)
         .fetch_all(&state.db)
         .await
         .map_err(server_err("resource search failed"))?;
@@ -114,14 +121,16 @@ async fn search(
                    l.supplier, i.name AS item, i.unit, i.location
             FROM inventory_lots l
             JOIN inventory i ON i.id = l.inventory_id
-            WHERE l.lot_code ILIKE $1 OR l.serial ILIKE $1
-               OR l.supplier ILIKE $1 OR i.name ILIKE $1
+            WHERE i.org_id IS NOT DISTINCT FROM $3
+              AND (l.lot_code ILIKE $1 OR l.serial ILIKE $1
+                OR l.supplier ILIKE $1 OR i.name ILIKE $1)
             ORDER BY l.expires_at NULLS LAST
             LIMIT $2
             "#,
         )
         .bind(&pattern)
         .bind(limit)
+        .bind(org)
         .fetch_all(&state.db)
         .await
         .map_err(server_err("lot search failed"))?;
@@ -154,14 +163,16 @@ async fn search(
             r#"
             SELECT id, description, status, quantity, unit, delivery_address, created_at
             FROM orders
-            WHERE description ILIKE $1 OR delivery_address ILIKE $1
-               OR target_part_number ILIKE $1 OR target_meta->>'resource' ILIKE $1
+            WHERE org_id IS NOT DISTINCT FROM $3
+              AND (description ILIKE $1 OR delivery_address ILIKE $1
+                OR target_part_number ILIKE $1 OR target_meta->>'resource' ILIKE $1)
             ORDER BY created_at DESC
             LIMIT $2
             "#,
         )
         .bind(&pattern)
         .bind(limit)
+        .bind(org)
         .fetch_all(&state.db)
         .await
         .map_err(server_err("order search failed"))?;
@@ -186,13 +197,15 @@ async fn search(
             SELECT id, name, status, destination_address, departs_at,
                    mass_capacity_kg, volume_capacity_m3
             FROM capsules
-            WHERE name ILIKE $1 OR destination_address ILIKE $1 OR notes ILIKE $1
+            WHERE org_id IS NOT DISTINCT FROM $3
+              AND (name ILIKE $1 OR destination_address ILIKE $1 OR notes ILIKE $1)
             ORDER BY departs_at NULLS LAST
             LIMIT $2
             "#,
         )
         .bind(&pattern)
         .bind(limit)
+        .bind(org)
         .fetch_all(&state.db)
         .await
         .map_err(server_err("capsule search failed"))?;
@@ -217,13 +230,15 @@ async fn search(
             r#"
             SELECT id, name, price_per_kg, price_per_m3, transit_days, currency
             FROM rate_cards
-            WHERE active AND (name ILIKE $1 OR notes ILIKE $1)
+            WHERE active AND org_id IS NOT DISTINCT FROM $3
+              AND (name ILIKE $1 OR notes ILIKE $1)
             ORDER BY name
             LIMIT $2
             "#,
         )
         .bind(&pattern)
         .bind(limit)
+        .bind(org)
         .fetch_all(&state.db)
         .await
         .map_err(server_err("rate search failed"))?;

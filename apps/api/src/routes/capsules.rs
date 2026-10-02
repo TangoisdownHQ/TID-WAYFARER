@@ -27,7 +27,8 @@ use serde_json::{json, Value};
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::routes::auth_middleware::AuthenticatedUser;
+use crate::routes::auth_middleware::{AuthenticatedUser, Caller};
+use crate::services::org_scope;
 use crate::AppState;
 
 type ApiError = (StatusCode, String);
@@ -140,8 +141,10 @@ async fn current_load(state: &AppState, capsule_id: Uuid) -> Result<Load, ApiErr
 async fn create_capsule(
     State(state): State<AppState>,
     AuthenticatedUser(claims): AuthenticatedUser,
+    Caller(principal): Caller,
     Json(body): Json<NewCapsule>,
 ) -> Result<(StatusCode, Json<Capsule>), ApiError> {
+    let org = org_scope::caller_org(&state, &principal).await;
     if body.name.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "a capsule needs a name".into()));
     }
@@ -158,8 +161,8 @@ async fn create_capsule(
         INSERT INTO capsules
           (name, operator_id, operator_outpost, mass_capacity_kg, volume_capacity_m3,
            origin_body_id, destination_body_id, origin_address, destination_address,
-           departs_at, arrives_at, notes)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+           departs_at, arrives_at, notes, org_id)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
         RETURNING *
         "#,
     )
@@ -175,6 +178,7 @@ async fn create_capsule(
     .bind(body.departs_at)
     .bind(body.arrives_at)
     .bind(&body.notes)
+    .bind(org)
     .fetch_one(&state.db)
     .await
     .map_err(server_err("could not create the capsule"))?;
@@ -191,8 +195,10 @@ pub struct CapsuleFilter {
 async fn list_capsules(
     State(state): State<AppState>,
     _user: AuthenticatedUser,
+    Caller(principal): Caller,
     Query(f): Query<CapsuleFilter>,
 ) -> Result<Json<Vec<Value>>, ApiError> {
+    let org = org_scope::caller_org(&state, &principal).await;
     let rows = sqlx::query(
         r#"
         SELECT c.*,
@@ -207,13 +213,15 @@ async fn list_capsules(
                    COUNT(*)       AS n
             FROM capsule_manifest GROUP BY capsule_id
         ) m ON m.capsule_id = c.id
-        WHERE ($1::text IS NULL OR c.status = $1)
+        WHERE c.org_id IS NOT DISTINCT FROM $3
+          AND ($1::text IS NULL OR c.status = $1)
           AND ($2::int  IS NULL OR c.destination_body_id = $2)
         ORDER BY c.departs_at NULLS LAST, c.created_at DESC
         "#,
     )
     .bind(&f.status)
     .bind(f.destination_body_id)
+    .bind(org)
     .fetch_all(&state.db)
     .await
     .map_err(server_err("capsule list failed"))?;

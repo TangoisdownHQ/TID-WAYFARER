@@ -218,59 +218,10 @@ async fn main() -> Result<(), sqlx::Error> {
     info!(dir = %static_dir, "serving UI at /ui and /static");
     let static_files = ServeDir::new(&static_dir);
 
-    // ---- API Routes ----
-    // Guard for groups reachable by humans (JWT) or peer nodes (X-Node-Token).
-    let guard = axum::middleware::from_fn_with_state(state.clone(), require_auth);
-
-    // Open: how you obtain a token, plus outpost identity (operator/probes).
-    let open_routes = Router::new()
-        .nest("/auth", auth_routes())
-        .nest("/local-auth", local_auth_routes())
-        .route("/outpost", get(outpost_info));
-
-    // Guarded at the router level. Groups whose handlers already demand
-    // AuthenticatedUser/AdminUser keep enforcing user JWTs on top of this.
-    let guarded_routes = Router::new()
-        .nest("/commsec", commsec_routes())
-        .nest("/inventory", inventory_routes().merge(inventory_lot_routes()))
-        .nest("/me", me_routes())
-        .nest("/packages", package_routes())
-        .nest("/assets", asset_routes().merge(asset_extras_routes()))
-        .nest("/kits", kit_routes())
-        .nest("/orders", order_routes())
-        .nest("/fulfillments", fulfillment_routes())
-        .nest("/supplylink", supplylink_routes())
-        .nest("/rollup", rollup_routes())
-        .nest("/lots", lot_routes())
-        .nest("/capsules", capsule_routes())
-        .nest("/compliance", compliance_routes())
-        .nest("/custody", custody_routes())
-        .nest("/rates", rate_routes())
-        .nest("/movements", movement_routes())
-        .nest("/documents", document_routes())
-        .nest("/search", search_routes())
-        .nest("/orgs", org_routes())
-        .nest("/fleet", fleet_asset_routes())
-        .nest("/users", user_routes())
-        .nest("/nodes", node_routes())
-        .nest("/nodes-sync", node_sync_routes())
-        .nest("/commands", command_routes())
-        .nest("/bc", blockchain_routes())
-        .nest("/dashboard", dashboard_routes())
-        .nest("/rules", rules_routes())
-        .nest("/peers", peer_routes())
-        .nest("/ops", ops_routes())
-        .nest("/dtn", dtn_routes())
-        .nest("/fabric", fabric_routes())
-        .nest("/map/fleet", fleet_map_routes())
-        .nest("/map", map_routes())
-        .nest("/bodies", body_routes())
-        // Lockdown sits inside the auth guard: only authenticated callers get
-        // far enough to be told the outpost is locked.
-        .route_layer(axum::middleware::from_fn_with_state(state.clone(), enforce_lockdown))
-        .route_layer(guard);
-
-    let api_routes = open_routes.merge(guarded_routes);
+    // Built by the shared constructor so the tests exercise the same guard,
+    // lockdown layer and nesting the service actually runs.
+    let api_routes = tid_wayfarer::app::api_router(state.clone())
+        .route("/outpost", axum::routing::get(outpost_info));
 
     // ---- Final Application ----
     let app = Router::new()

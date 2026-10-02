@@ -34,7 +34,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use tokio::task::JoinSet;
 
-use crate::routes::auth_middleware::{AdminUser, AuthenticatedUser};
+use crate::routes::auth_middleware::{AdminUser, AuthenticatedUser, Caller};
+use crate::services::org_scope;
 use crate::services::fabric_auth;
 use crate::AppState;
 
@@ -166,9 +167,14 @@ pub struct InventoryRollup {
 /// is not yet meaningful. That is why the aggregate endpoint is admin-gated.
 async fn local_summary(
     State(state): State<AppState>,
+    Caller(principal): Caller,
     _user: Option<AuthenticatedUser>,
 ) -> Result<Json<OutpostSummary>, (axum::http::StatusCode, String)> {
-    let items = local_items(&state).await.map_err(|e| {
+    // A peer asks on behalf of its own organisation; it is shown that org's
+    // holdings here and nothing else. Holdings never cross an org boundary —
+    // `inventory` is not a grantable scope, by design.
+    let org = org_scope::caller_org(&state, &principal).await;
+    let items = local_items(&state, org).await.map_err(|e| {
         tracing::error!(error = %e, "local inventory summary failed");
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -194,7 +200,10 @@ fn env_or(key: &str, default: &str) -> String {
 /// (name, unit, category, location). Several rows for the same thing at the
 /// same place — different owners, separate deliveries — are one stock figure
 /// for logistics purposes.
-async fn local_items(state: &AppState) -> Result<Vec<SummaryItem>, sqlx::Error> {
+async fn local_items(
+    state: &AppState,
+    org: Option<uuid::Uuid>,
+) -> Result<Vec<SummaryItem>, sqlx::Error> {
     let rows = sqlx::query(
         r#"
         SELECT name,
@@ -204,10 +213,12 @@ async fn local_items(state: &AppState) -> Result<Vec<SummaryItem>, sqlx::Error> 
                SUM(quantity)::int8  AS quantity,
                SUM(threshold)::int8 AS threshold
         FROM inventory
+        WHERE org_id IS NOT DISTINCT FROM $1
         GROUP BY name, unit, category, location
         ORDER BY name, location
         "#,
     )
+    .bind(org)
     .fetch_all(&state.db)
     .await?;
 
@@ -237,9 +248,11 @@ async fn local_items(state: &AppState) -> Result<Vec<SummaryItem>, sqlx::Error> 
 /// federated per user (see [`local_summary`]).
 async fn inventory_rollup(
     State(state): State<AppState>,
+    Caller(principal): Caller,
     _admin: AdminUser,
 ) -> Result<Json<InventoryRollup>, (axum::http::StatusCode, String)> {
-    let (sources, summaries) = gather(&state).await;
+    let org = org_scope::caller_org(&state, &principal).await;
+    let (sources, summaries) = gather(&state, org).await;
     Ok(Json(merge(sources, summaries)))
 }
 
@@ -257,12 +270,15 @@ struct Peer {
 /// Fetch every source's summary concurrently. Returns per-source status
 /// alongside whatever summaries arrived, so the caller can report both what it
 /// learned and what it could not reach.
-async fn gather(state: &AppState) -> (Vec<SourceStatus>, Vec<OutpostSummary>) {
+async fn gather(
+    state: &AppState,
+    org: Option<uuid::Uuid>,
+) -> (Vec<SourceStatus>, Vec<OutpostSummary>) {
     let mut sources = Vec::new();
     let mut summaries = Vec::new();
 
     // ---- this outpost, read straight from the DB ----
-    match local_items(state).await {
+    match local_items(state, org).await {
         Ok(items) => {
             sources.push(SourceStatus {
                 node_id: state.identity.node_id.clone(),

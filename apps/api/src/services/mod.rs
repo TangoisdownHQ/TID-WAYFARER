@@ -15,6 +15,7 @@ pub mod settlement;
 pub mod custody;
 pub mod forecast;
 pub mod org_trust;
+pub mod org_scope;
 pub mod dtn;
 pub mod blockchain_feeder;
 
