@@ -13,6 +13,17 @@
   .daysleft { font-family: var(--mono); }
   .daysleft.past { color: var(--dark); }
   .daysleft.soon { color: var(--lagging); }
+
+  /* Consumption against the binding limit, as one bar. A percentage alone
+     hides how much is left; the number beside it says it plainly. */
+  .lifebar { position: relative; height: 18px; min-width: 130px;
+             background: var(--bg); border: 1px solid var(--edge); border-radius: 5px; overflow: hidden; }
+  .lifebar .fill { position: absolute; inset: 0 auto 0 0; background: var(--live); opacity: .34; }
+  .lifebar.warn .fill { background: var(--lagging); opacity: .36; }
+  .lifebar.over .fill { background: var(--dark); opacity: .34; }
+  .lifebar .txt { position: absolute; inset: 0; display: flex; align-items: center;
+                  justify-content: center; font-family: var(--mono); font-size: 11px; }
+  tr.over td { background: linear-gradient(90deg, rgba(251,106,106,.08), transparent 60%); }
   dialog {
     border: 1px solid var(--edge-lit); border-radius: var(--r);
     background: var(--panel); color: var(--ink); padding: 0; max-width: 460px; width: 92%;
@@ -35,7 +46,8 @@
 
     <div class="rail" id="rail">
       <div><span class="label">Expired, still on the shelf</span><div class="since" id="lapsed">—</div></div>
-      <p class="muted" style="margin:0;font-size:13px;max-width:62ch" id="railnote"></p>
+      <div><span class="label">Past a life limit</span><div class="since" id="overlife">—</div></div>
+      <p class="muted" style="margin:0;font-size:13px;max-width:56ch" id="railnote"></p>
     </div>
 
     <!-- Recall first: it is the thing someone opens this page in a hurry to do. -->
@@ -51,6 +63,30 @@
       <button type="submit">Trace</button>
     </form>
     <div id="traceout"></div>
+
+    <!-- Life limits sit beside expiry because they are the same question asked
+         of a different clock: what will stop being usable, and when. A date
+         retires a seal; cycles retire a battery; hours retire a motor. -->
+    <div class="sectionhead"><h2>Approaching a life limit</h2>
+      <span class="label"><select id="atpct" style="width:auto;padding:3px 7px;font-size:12px">
+        <option value="0.5">past 50%</option>
+        <option value="0.8" selected>past 80%</option>
+        <option value="0.95">past 95%</option>
+      </select></span></div>
+    <p class="muted" style="margin:0 0 12px;font-size:13px;max-width:76ch">
+      Units retired by use rather than by date. Cycles, hours and calendar time
+      can all apply at once, so the figure shown is whichever clock binds
+      first — a motor at 40% of its hours and 98% of its cycles is at 98%.
+    </p>
+    <div class="tablewrap" style="margin-bottom:8px">
+      <table>
+        <thead><tr>
+          <th>Item</th><th>Serial</th><th>Location</th><th>Limited by</th>
+          <th style="min-width:160px">Life used</th><th class="num">Remaining</th><th></th>
+        </tr></thead>
+        <tbody id="life"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
 
     <div class="sectionhead"><h2>Expiring stock</h2>
       <span class="label"><select id="horizon" style="width:auto;padding:3px 7px;font-size:12px">
@@ -90,6 +126,33 @@
   </div>
 </dialog>
 
+<dialog id="udialog">
+  <div class="body">
+    <h3 id="u-title">Record usage</h3>
+    <p class="muted" style="margin:0 0 14px;font-size:13px">
+      Usage accrues against this unit, not the part. Two units from one batch
+      retire at different times because one worked twice as hard.
+    </p>
+    <form id="uform">
+      <div class="row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <label class="field"><span class="label">Cycles used</span>
+          <input id="u-cycles" type="number" step="any" min="0" /></label>
+        <label class="field"><span class="label">Hours used</span>
+          <input id="u-hours" type="number" step="any" min="0" /></label>
+      </div>
+      <label class="field"><span class="label">In service since</span>
+        <input id="u-since" type="date" />
+        <span class="hint" style="display:block;color:var(--faint);font-size:11.5px;margin-top:4px">
+          Starts the calendar clock, for parts that age whether used or not.</span></label>
+      <div class="err" id="u-err"></div>
+      <div class="actions">
+        <button type="submit">Save</button>
+        <button type="button" class="linkish" id="u-cancel" style="color:var(--dim)">Cancel</button>
+      </div>
+    </form>
+  </div>
+</dialog>
+
 <script type="module">
 import { api, el, esc, setText, page } from "/static/js/wayfarer.js";
 
@@ -99,6 +162,7 @@ const STATUS_TONE = {
 };
 
 let pendingLot = null;
+let pendingUnit = null;
 
 function daysCell(d, expired) {
   if (d == null) return '<span class="loc">—</span>';
@@ -106,17 +170,110 @@ function daysCell(d, expired) {
   return `<span class="daysleft ${cls}">${expired ? `${esc(d)}` : `${esc(d)}`}</span>`;
 }
 
+/* ---- Life limits ---- */
+
+function lifeBar(u) {
+  const pct = Number(u.percentUsed);
+  const tone = u.pastLimit ? "over" : pct >= 90 ? "warn" : "";
+  return `<div class="lifebar ${tone}">
+      <div class="fill" style="width:${Math.min(100, pct)}%"></div>
+      <span class="txt">${esc(u.used)} / ${esc(u.limit)} ${esc(u.limitedBy)}</span>
+    </div>`;
+}
+
+async function loadLife() {
+  const r = await api(`/lots/life?at_pct=${el("atpct").value}`);
+  setText("overlife", r.pastLimit);
+
+  const body = el("life");
+  if (!r.count) {
+    body.innerHTML = `<tr><td colspan="7" class="empty">
+      Nothing is past ${esc(r.atPercent)}% of a life limit. Units only appear here once a
+      limit is set on the part and usage has been recorded against them.</td></tr>`;
+    return r;
+  }
+
+  body.innerHTML = r.units.map((u) => `
+    <tr${u.pastLimit ? ' class="over"' : ""}>
+      <td>${esc(u.item)}</td>
+      <td class="mono">${esc(u.serial ?? u.lotCode ?? "—")}</td>
+      <td class="loc">${esc(u.location ?? "—")}</td>
+      <td><span class="pill ${u.pastLimit ? "bad" : "wait"}">${esc(u.limitedBy)}</span></td>
+      <td>${lifeBar(u)}</td>
+      <td class="num ${u.pastLimit ? "" : ""}" style="${u.pastLimit ? "color:var(--dark)" : ""}">
+        ${esc(u.remaining)} <span class="loc">${esc(u.limitedBy)}</span></td>
+      <td style="white-space:nowrap">
+        <button class="linkish usage" data-id="${esc(u.lotId)}"
+                data-label="${esc(u.serial ?? u.lotCode ?? u.item)}"
+                data-cycles="${esc(u.limitedBy === "cycles" ? u.used : "")}"
+                data-hours="${esc(u.limitedBy === "hours" ? u.used : "")}"
+                style="color:var(--signal);font-size:12px">Usage</button>
+        ${u.pastLimit ? `<button class="linkish quarantine" data-id="${esc(u.lotId)}"
+             data-label="${esc(u.serial ?? u.lotCode ?? u.item)}"
+             style="color:var(--dark);font-size:12px;margin-left:10px">Retire</button>` : ""}
+      </td>
+    </tr>`).join("");
+
+  bindUsage(body);
+  bindQuarantine(body);
+  return r;
+}
+
+function bindUsage(scope) {
+  scope.querySelectorAll("button.usage").forEach((b) =>
+    b.addEventListener("click", () => {
+      pendingUnit = b.dataset.id;
+      setText("u-title", `Record usage · ${b.dataset.label}`);
+      el("u-cycles").value = b.dataset.cycles || "";
+      el("u-hours").value = b.dataset.hours || "";
+      el("u-since").value = "";
+      el("u-err").textContent = "";
+      el("udialog").showModal();
+    }));
+}
+
+el("u-cancel").addEventListener("click", () => el("udialog").close());
+el("atpct").addEventListener("change", () => loadLife().catch((e) => console.error(e)));
+
+el("uform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!pendingUnit) return;
+  const err = el("u-err"); err.textContent = "";
+  const since = el("u-since").value;
+  try {
+    await api(`/lots/${pendingUnit}/usage`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        cycles_used: el("u-cycles").value === "" ? null : Number(el("u-cycles").value),
+        hours_used: el("u-hours").value === "" ? null : Number(el("u-hours").value),
+        in_service_since: since ? new Date(`${since}T00:00:00Z`).toISOString() : null,
+      }),
+    });
+    el("udialog").close();
+    await loadAll();
+  } catch (ex) {
+    err.textContent = ex.message;
+  }
+});
+
+/* Quarantine is reachable from both tables, so the binding is shared rather
+ * than written twice and allowed to drift. */
+function bindQuarantine(scope) {
+  scope.querySelectorAll("button.quarantine").forEach((b) =>
+    b.addEventListener("click", () => {
+      pendingLot = { id: b.dataset.id, label: b.dataset.label };
+      setText("q-title", `Quarantine ${b.dataset.label}`);
+      el("q-reason").value = "";
+      el("q-err").textContent = "";
+      el("qdialog").showModal();
+    }));
+}
+
 async function loadExpiring() {
   const days = el("horizon").value;
   const r = await api(`/lots/expiring?days=${days}`);
 
-  const rail = el("rail");
-  rail.className = `rail ${r.alreadyExpired ? "dark" : r.count ? "lagging" : "live"}`;
   setText("lapsed", r.alreadyExpired);
-  setText("railnote", r.alreadyExpired
-    ? "Past its date and still marked usable. This is a present problem, not a planning horizon."
-    : r.count ? `${r.count} lot(s) lapse inside the window. Nothing is overdue yet.`
-              : "Nothing lapses inside this window.");
 
   const body = el("expiring");
   if (!r.count) {
@@ -137,17 +294,11 @@ async function loadExpiring() {
             style="color:var(--dark);font-size:12px">Quarantine</button></td>
     </tr>`).join("");
 
-  body.querySelectorAll("button.quarantine").forEach((b) =>
-    b.addEventListener("click", () => {
-      pendingLot = { id: b.dataset.id, label: b.dataset.label };
-      setText("q-title", `Quarantine ${b.dataset.label}`);
-      el("q-reason").value = "";
-      el("q-err").textContent = "";
-      el("qdialog").showModal();
-    }));
+  bindQuarantine(body);
+  return r;
 }
 
-el("horizon").addEventListener("change", () => loadExpiring().catch((e) => console.error(e)));
+el("horizon").addEventListener("change", () => loadAll().catch((e) => console.error(e)));
 el("q-cancel").addEventListener("click", () => el("qdialog").close());
 
 el("qform").addEventListener("submit", async (e) => {
@@ -160,7 +311,7 @@ el("qform").addEventListener("submit", async (e) => {
       body: JSON.stringify({ reason: el("q-reason").value }),
     });
     el("qdialog").close();
-    await loadExpiring();
+    await loadAll();
     if (el("t-q").value.trim()) await runTrace(el("t-q").value);
   } catch (ex) {
     err.textContent = /400/.test(ex.message) ? "A quarantine needs a reason." : ex.message;
@@ -208,14 +359,7 @@ async function runTrace(term) {
       </table>
     </div>`;
 
-  out.querySelectorAll("button.quarantine").forEach((b) =>
-    b.addEventListener("click", () => {
-      pendingLot = { id: b.dataset.id, label: b.dataset.label };
-      setText("q-title", `Quarantine ${b.dataset.label}`);
-      el("q-reason").value = "";
-      el("q-err").textContent = "";
-      el("qdialog").showModal();
-    }));
+  bindQuarantine(out);
 }
 
 el("traceform").addEventListener("submit", (e) => {
@@ -225,11 +369,25 @@ el("traceform").addEventListener("submit", (e) => {
   });
 });
 
+/* Both clocks feed one rail: a unit can be fine on its date and finished on
+ * its cycles, and an operator needs to see whichever is true. */
+async function loadAll() {
+  const [exp, life] = await Promise.all([loadExpiring(), loadLife()]);
+  const bad = (exp?.alreadyExpired ?? 0) + (life?.pastLimit ?? 0);
+  const soon = (exp?.count ?? 0) + (life?.count ?? 0);
+  const rail = el("rail");
+  rail.className = `rail ${bad ? "dark" : soon ? "lagging" : "live"}`;
+  setText("railnote", bad
+    ? "Past a date or a life limit and still marked usable. A present problem, not a planning horizon."
+    : soon ? `${soon} unit(s) approaching a limit. Nothing is overdue yet.`
+           : "Nothing is near a date or a life limit.");
+}
+
 page({
   current: "lots.html",
   ident: "lots",
   blurb: "Sign in to trace batches and check expiry.",
-  onReady: loadExpiring,
+  onReady: loadAll,
   intervalMs: 60000,
 });
 </script>

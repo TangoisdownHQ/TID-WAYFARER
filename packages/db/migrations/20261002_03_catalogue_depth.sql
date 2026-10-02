@@ -20,9 +20,20 @@ ALTER TABLE inventory ADD COLUMN IF NOT EXISTS hazard_class           TEXT;   --
 ALTER TABLE inventory ADD COLUMN IF NOT EXISTS un_number              TEXT;   -- e.g. "UN3480"
 ALTER TABLE inventory ADD COLUMN IF NOT EXISTS storage_notes          TEXT;
 
-ALTER TABLE inventory ADD CONSTRAINT inventory_temp_range_sane
-    CHECK (storage_temp_min_c IS NULL OR storage_temp_max_c IS NULL
-           OR storage_temp_min_c <= storage_temp_max_c) NOT VALID;
+-- ADD CONSTRAINT has no IF NOT EXISTS, so it needs the same guard the
+-- account_type migration uses. Without it this file aborted on every container
+-- start after the first — and it aborted here, at line 23, which meant the life
+-- limits and supplier tables below never ran on a fresh deploy.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'inventory_temp_range_sane'
+  ) THEN
+    ALTER TABLE inventory ADD CONSTRAINT inventory_temp_range_sane
+        CHECK (storage_temp_min_c IS NULL OR storage_temp_max_c IS NULL
+               OR storage_temp_min_c <= storage_temp_max_c) NOT VALID;
+  END IF;
+END $$;
 
 -- === Life limits ===
 -- A part retired by use rather than by date: cycles for a battery or an

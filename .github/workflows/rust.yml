@@ -2,9 +2,24 @@ name: Rust CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
+
+env:
+  # Compile against the committed query cache rather than a live database.
+  #
+  # This is why CI was failing: `sqlx::query!` verifies each query at compile
+  # time, and without this it tried to verify against the CI Postgres — which
+  # exists but has no schema, because nothing applied the migrations. Every
+  # macro then failed to resolve a type, producing 44 errors that all looked
+  # like unrelated Rust problems. It built locally only because dotenvy picked
+  # up a DATABASE_URL pointing at a developer's already-migrated database.
+  #
+  # Offline is also what the Docker build uses, so CI now compiles the same way
+  # the shipped image does.
+  SQLX_OFFLINE: "true"
+  CARGO_TERM_COLOR: always
 
 jobs:
   build:
@@ -12,7 +27,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:15
+        image: postgres:16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: password
@@ -25,24 +40,48 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
-    env:
-      DATABASE_URL: postgres://postgres:password@localhost:5432/tidasone_test
-
     steps:
-      - name: Checkout repository (with submodules)
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      # Submodules are deliberately not fetched. liboqs and liboqs-python are
+      # ~570 MB and nothing in the Rust build references them — the
+      # post-quantum primitives come from the pqcrypto-* crates. Fetching them
+      # cost several minutes a run for nothing.
+      - uses: actions/checkout@v4
 
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libpq-dev
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Build project
-        run: cargo build --verbose
+      - name: Check formatting of the migration set
+        run: |
+          echo "migrations: $(ls packages/db/migrations/*.sql | wc -l)"
 
-      - name: Run tests
-        run: cargo test --verbose
+      - name: Build
+        run: cargo build --workspace --verbose
 
+      - name: Unit tests
+        run: cargo test --lib --verbose
+
+      - name: Apply migrations
+        env:
+          PGPASSWORD: password
+        run: |
+          # Applied twice on purpose. Migrations run on every container start,
+          # so one that is not re-runnable breaks every deploy after the first
+          # — and that is invisible to a single pass on an empty database.
+          # Two unguarded statements were found exactly this way.
+          for pass in 1 2; do
+            echo "--- pass $pass ---"
+            for f in packages/db/migrations/*.sql; do
+              psql -h localhost -U postgres -d tidasone_test -v ON_ERROR_STOP=1 -q -f "$f" \
+                || { echo "FAILED on $(basename "$f") during pass $pass"; exit 1; }
+            done
+          done
+          echo "migrations are re-runnable"
+
+      - name: Integration tests
+        # Without this the boundary tests skip silently, so CI would pass while
+        # one organisation could read another's inventory. These are the tests
+        # that found two real leaks.
+        env:
+          TEST_DATABASE_URL: postgres://postgres:password@localhost:5432/tidasone_test
+        run: cargo test --test boundaries --verbose
