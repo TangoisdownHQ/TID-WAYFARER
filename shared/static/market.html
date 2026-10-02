@@ -114,9 +114,12 @@
 </div>
 
 <script type="module">
-import { api, boot, ageSince, el, setText, esc , mountNav, mountFabricBar, mountSearch } from "/static/js/wayfarer.js";
+import { api, API, token, boot, ageSince, el, setText, esc,
+         mountNav, mountFabricBar, mountSearch } from "/static/js/wayfarer.js";
 
 let openOrderId = null;
+const openChains = new Set();
+const chains = new Map();
 
 const ORDER_PILL = {
   posted: "wait", bid: "wait", accepted: "ok", shipped: "ok",
@@ -163,6 +166,12 @@ async function refresh() {
 async function openOrder(id, quiet = false) {
   openOrderId = id;
   const { order, bids } = await api(`/orders/${id}`);
+  // The comparison carries cost-per-kg, ceiling checks and each carrier's
+  // demonstrated reliability. It is a separate call so a core without the
+  // rates module still renders the plain bid list.
+  let cmp = null;
+  try { cmp = await api(`/rates/compare/${id}`); } catch { /* optional */ }
+  const byId = new Map((cmp?.bids ?? []).map((b) => [b.bidId, b]));
   const detail = el("detail");
 
   detail.innerHTML = `
@@ -171,19 +180,30 @@ async function openOrder(id, quiet = false) {
         <h2>${esc(order.description)}</h2>
         <button class="linkish" id="closedetail" type="button" style="color:var(--dim)">Close</button>
       </div>
+      ${leaders(cmp)}
+
       <div class="tablewrap">
         <table>
-          <thead><tr><th class="num">Price</th><th class="num">Transit</th><th>State</th><th>Placed</th><th></th></tr></thead>
+          <thead><tr>
+            <th class="num">Price</th><th class="num">Per kg</th><th class="num">Transit</th>
+            <th>Track record</th><th>State</th><th>Placed</th><th></th>
+          </tr></thead>
           <tbody>
-            ${bids.length ? bids.map((b) => `<tr>
-              <td class="num">${esc(b.price)} TIDAT</td>
+            ${bids.length ? bids.map((b) => {
+              const c = byId.get(b.id);
+              const over = c && c.withinCeiling === false;
+              return `<tr>
+              <td class="num">${esc(b.price)} TIDAT${
+                over ? ` <span class="pill bad" title="above the order's price ceiling">over</span>` : ""}</td>
+              <td class="num mono muted">${c?.costPerKg ? esc(c.costPerKg) : "—"}</td>
               <td class="num">${b.transit_days != null ? esc(b.transit_days) + " d" : "—"}</td>
+              <td>${reliability(c?.reliability)}</td>
               <td><span class="pill ${b.status === "accepted" ? "ok" : b.status === "rejected" ? "idle" : "wait"}">${esc(b.status)}</span></td>
               <td class="mono muted">${ageSince(b.created_at)} ago</td>
               <td>${b.status === "submitted" && (order.status === "posted" || order.status === "bid")
                     ? `<button data-accept="${esc(b.id)}" type="button">Accept</button>` : ""}</td>
-            </tr>`).join("")
-            : `<tr><td colspan="5" class="empty">No bids yet. Carriers see this order in their own console.</td></tr>`}
+            </tr>`;}).join("")
+            : `<tr><td colspan="7" class="empty">No bids yet. Carriers see this order in their own console.</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -236,6 +256,98 @@ async function openOrder(id, quiet = false) {
   if (!quiet) detail.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
+
+/* ---- Bid comparison ------------------------------------------------------
+ * Three axes, no verdict. Naming a single "best bid" would hide its own
+ * weighting, and the right weighting depends on whether this is a spare bolt
+ * or the oxygen supply. So the leaders are shown as three separate facts and
+ * the choice stays with the person placing the order. */
+
+function leaders(cmp) {
+  if (!cmp || !cmp.bidCount) return "";
+  const l = cmp.leaders;
+  const card = (title, pick, fmt) => `
+    <div class="card" style="padding:12px 14px">
+      <span class="label">${title}</span>
+      ${pick
+        ? `<div style="font-size:14px;font-weight:600;margin-top:5px">${esc(pick.bidder ?? "—")}</div>
+           <span class="mono muted">${esc(fmt(pick))}</span>`
+        : `<div class="v unknown" style="font-size:15px;margin-top:5px">—</div>
+           <span class="mono muted">no bid qualifies</span>`}
+    </div>`;
+
+  return `
+    <p class="muted" style="margin:0 0 10px;font-size:12.5px;max-width:74ch">
+      Cheapest, fastest and most reliable are rarely the same bid. These are
+      three facts, not a recommendation — the trade between them is yours.
+    </p>
+    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:11px;margin-bottom:14px">
+      ${card("Cheapest", l.cheapest, (p) => `${p.value} TIDAT`)}
+      ${card("Fastest", l.fastest, (p) => `${p.value} days`)}
+      ${card("Most reliable", l.mostReliable, (p) => `${p.onTimeRate}% on time`)}
+    </div>`;
+}
+
+/* A rate from a handful of shipments is not a track record. The API withholds
+ * it below five, and the UI says why rather than showing a blank. */
+function reliability(r) {
+  if (!r) return '<span class="muted mono" style="font-size:11.5px">—</span>';
+  if (!r.sampleSufficient) {
+    return `<span class="pill unknown" title="${esc(r.note ?? "")}">${r.completedShipments} shipment${
+      r.completedShipments === 1 ? "" : "s"}</span>`;
+  }
+  const tone = r.onTimeRate >= 90 ? "ok" : r.onTimeRate >= 70 ? "wait" : "bad";
+  return `<span class="pill ${tone}">${r.onTimeRate}% on time</span>
+    <div class="muted mono" style="font-size:11px;margin-top:3px">
+      ${r.completedShipments} shipped${r.conditionExceptionRate ? ` · ${r.conditionExceptionRate}% damaged` : ""}</div>`;
+}
+
+/* ---- Custody chain -------------------------------------------------------
+ * Who handed what to whom. Two properties are reported separately because a
+ * chain can be structurally whole and still rest on receipts nobody signed. */
+
+const CONDITION_TONE = { ok: "ok", damaged: "bad", short: "bad", contaminated: "bad", unknown: "unknown" };
+
+function chainBlock(c) {
+  if (!c.legs) {
+    return `<div class="muted" style="font-size:12.5px;padding:4px 0">
+      No handoffs recorded yet. Custody is unevidenced until the first receipt is filed.</div>`;
+  }
+  const faults = c.faults.map((f) =>
+    `<div class="item critical" style="margin:0 0 6px"><span class="count">!</span>
+       <span class="body"><strong>${esc(f.kind.replace("_", " "))}</strong>
+       <span>${esc(f.detail)}</span></span></div>`).join("");
+
+  return `
+    <div style="display:flex;gap:9px;flex-wrap:wrap;margin-bottom:9px">
+      <span class="pill ${c.intact ? "ok" : "bad"}">${c.intact ? "chain intact" : "chain broken"}</span>
+      <span class="pill ${c.fullySigned ? "ok" : "unknown"}">${
+        c.fullySigned ? "fully signed" : `${c.unverifiedLegs} unsigned`}</span>
+      ${c.conditionExceptions.length
+        ? `<span class="pill bad">${c.conditionExceptions.length} condition exception${
+            c.conditionExceptions.length === 1 ? "" : "s"}</span>` : ""}
+    </div>
+    ${faults}
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th class="num">#</th><th>Event</th><th>From</th><th>To</th>
+          <th>Condition</th><th>When</th><th>Attested</th></tr></thead>
+        <tbody>${c.chain.map((leg) => `
+          <tr>
+            <td class="num mono">${esc(leg.seq)}</td>
+            <td>${esc(leg.event)}</td>
+            <td class="mono muted">${esc(leg.fromLabel ?? "—")}</td>
+            <td class="mono muted">${esc(leg.toLabel ?? leg.toNode ?? "—")}</td>
+            <td><span class="pill ${CONDITION_TONE[leg.condition] ?? "idle"}">${esc(leg.condition)}</span></td>
+            <td class="mono muted">${ageSince(leg.occurredAt)} ago</td>
+            <td>${leg.verified
+                ? '<span class="pill ok">signed</span>'
+                : '<span class="pill unknown" title="recorded, but not attested by the receiving party">unsigned</span>'}</td>
+          </tr>`).join("")}</tbody>
+      </table>
+    </div>`;
+}
+
 async function refreshFulfilments(orders) {
   const active = orders.filter((o) => ["accepted", "shipped", "delivered", "settling", "settled"].includes(o.status));
   const body = el("fulfilments");
@@ -257,8 +369,13 @@ async function refreshFulfilments(orders) {
           f.settlement_error ? `<div class="muted mono" style="margin-top:4px">${esc(f.settlement_error)}</div>` : ""}</td>
         <td class="num">${f.settlement_amount != null ? esc(f.settlement_amount) : "—"}</td>
         <td class="mono muted">${ageSince(f.created_at)}</td>
-        <td>${next ? `<button class="ghost" data-step="${next}" data-f="${esc(f.id)}" type="button">Mark ${next}</button>` : ""}</td>
-      </tr>`;
+        <td>${next ? `<button class="ghost" data-step="${next}" data-f="${esc(f.id)}" type="button">Mark ${next}</button>` : ""}
+            <button class="linkish" data-chain="${esc(o.id)}" type="button"
+                    style="color:var(--signal);font-size:12px;margin-left:8px">${
+              openChains.has(o.id) ? "Hide" : "Custody"}</button>
+            ${docLinks(o.id)}</td>
+      </tr>${openChains.has(o.id) ? `
+      <tr><td colspan="6" style="background:var(--panel-2)">${chains.get(o.id) ?? '<span class="muted">Loading…</span>'}</td></tr>` : ""}`;
     } catch {
       return `<tr><td>${esc(o.description)}</td><td colspan="5" class="muted">Delivery details unavailable.</td></tr>`;
     }
@@ -267,6 +384,56 @@ async function refreshFulfilments(orders) {
   body.innerHTML = rows.join("");
   body.querySelectorAll("[data-step]").forEach((b) =>
     b.addEventListener("click", () => advance(b.dataset.f, b.dataset.step)));
+
+  body.querySelectorAll("[data-doc]").forEach((b) =>
+    b.addEventListener("click", () => openDoc(b.dataset.doc, b.dataset.order)));
+
+  body.querySelectorAll("[data-chain]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const id = b.dataset.chain;
+      if (openChains.has(id)) {
+        openChains.delete(id);
+      } else {
+        openChains.add(id);
+        try { chains.set(id, chainBlock(await api(`/custody/chain/${id}`))); }
+        catch (e) { chains.set(id, `<span class="muted">${esc(e.message)}</span>`); }
+      }
+      await refresh();
+    }));
+}
+
+/* Documents are generated from what is already recorded, so they are offered
+ * wherever a consignment is — not filed on a separate page nobody visits.
+ *
+ * Buttons rather than links: the document endpoints sit behind the auth guard,
+ * and a plain href carries no token, so an <a> would 401 and look like the
+ * feature was broken. */
+const DOCS = [
+  ["packing-list", "packing list"],
+  ["bill-of-lading", "bill of lading"],
+  ["customs-declaration", "customs"],
+  ["invoice", "invoice"],
+];
+
+function docLinks(orderId) {
+  return `<span class="docs">${DOCS.map(([slug, label]) =>
+    `<button class="linkish" data-doc="${slug}" data-order="${esc(orderId)}"
+             type="button" title="Open the ${label}">${label}</button>`).join("")}</span>`;
+}
+
+/* Fetch with the token, then hand the browser a blob. The document opens in a
+ * tab and the URL is released once it has loaded. */
+async function openDoc(slug, orderId) {
+  const res = await fetch(`${API}/documents/${slug}/${orderId}?format=text`, {
+    headers: { Authorization: `Bearer ${token()}` },
+  });
+  if (!res.ok) {
+    alert(`Could not generate that document (${res.status}).`);
+    return;
+  }
+  const url = URL.createObjectURL(new Blob([await res.text()], { type: "text/plain" }));
+  window.open(url, "_blank", "noopener");
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
 /// Reveal the wallet prompt only when there isn't one — an address already on

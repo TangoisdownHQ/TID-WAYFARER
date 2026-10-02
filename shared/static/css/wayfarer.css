@@ -326,3 +326,8 @@ a.peer:hover { border-color: var(--signal); }
   .fabric-note { display: none; }
   .hitdetail { display: none; }
 }
+
+/* Document shortcuts on a delivery row. */
+.docs { display: inline-flex; gap: 9px; flex-wrap: wrap; margin-left: 8px; }
+.docs button { color: var(--dim); font-size: 11.5px; padding: 0; }
+.docs button:hover { color: var(--signal); }
