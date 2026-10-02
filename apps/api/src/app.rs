@@ -19,6 +19,7 @@ use crate::routes::{
     blockchain::blockchain_routes,
     bodies::body_routes,
     capsules::capsule_routes,
+    catalogue::catalogue_routes,
     commands::command_routes,
     commsec::commsec_routes,
     compliance::compliance_routes,
@@ -83,6 +84,7 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .nest("/documents", document_routes())
         .nest("/search", search_routes())
         .nest("/orgs", org_routes())
+        .nest("/catalogue", catalogue_routes())
         .nest("/fleet", fleet_asset_routes())
         .nest("/users", user_routes())
         .nest("/nodes", node_routes())

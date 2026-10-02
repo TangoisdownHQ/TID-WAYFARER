@@ -36,6 +36,7 @@ pub mod movements;
 pub mod documents;
 pub mod search;
 pub mod orgs;
+pub mod catalogue;
 
 // Re-export route functions
 pub use auth::auth_routes;
@@ -72,3 +73,4 @@ pub use movements::movement_routes;
 pub use documents::document_routes;
 pub use search::search_routes;
 pub use orgs::org_routes;
+pub use catalogue::catalogue_routes;

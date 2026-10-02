@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Wayfarer — Catalogue</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="/static/css/wayfarer.css" />
+<style>
+  .loc { color: var(--dim); font-family: var(--mono); font-size: 12px; }
+  .pn  { font-family: var(--mono); font-size: 12.5px; color: var(--ink); }
+  tr.entry { cursor: pointer; }
+  tr.entry:hover td { background: var(--panel-2); }
+
+  dialog {
+    border: 1px solid var(--edge-lit); border-radius: var(--r);
+    background: var(--panel); color: var(--ink); padding: 0;
+    max-width: 680px; width: 94%;
+  }
+  dialog::backdrop { background: rgba(3,6,10,.72); }
+  dialog .body { padding: 22px 24px 24px; max-height: 84vh; overflow-y: auto; }
+  dialog h3 { margin: 0 0 4px; font-size: 17px; }
+
+  /* Identity first, then the numbers, then the physical facts. The order
+     follows how someone holding the part actually reads it off the label. */
+  fieldset {
+    border: 0; border-top: 1px solid var(--edge); margin: 18px 0 0; padding: 14px 0 0;
+  }
+  legend {
+    font-family: var(--mono); font-size: 10px; letter-spacing: .18em;
+    text-transform: uppercase; color: var(--dim); font-weight: 600; padding: 0 9px 0 0;
+  }
+  .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+  .hint { display: block; color: var(--faint); font-size: 11.5px; margin-top: 4px; line-height: 1.45; }
+  .check { display: flex; align-items: flex-start; gap: 9px; margin-top: 4px; }
+  .check input { width: auto; margin-top: 2px; }
+  .actions { display: flex; gap: 9px; margin-top: 20px; align-items: center; }
+
+  /* Specification rows: a part's meaningful attributes vary completely by
+     type, so they are entered as pairs rather than a fixed set of fields. */
+  .specrow { display: grid; grid-template-columns: 1fr 1fr auto; gap: 9px; margin-bottom: 8px; }
+  .specrow button { padding: 8px 11px; }
+</style>
+</head>
+<body>
+
+<div id="login"></div>
+
+<div id="app" style="display:none">
+  <header></header>
+  <div class="wrap">
+    <div id="fabricbar"></div>
+    <div id="searchbar"></div>
+
+    <div class="sectionhead" style="margin-top:0">
+      <h2>Catalogue</h2>
+      <span><span class="label" id="count">—</span>
+        <button id="add" type="button" style="margin-left:12px">Register a resource</button></span>
+    </div>
+    <p class="muted" style="margin:0 0 14px;font-size:13px;max-width:78ch">
+      What each resource <em>is</em>, as distinct from how much is on hand. A
+      part number is what makes two rows called "pump" distinguishable — and
+      what a recall notice, a warranty claim and a reorder all key on.
+    </p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>Resource</th><th>Part number</th><th>Manufacturer</th><th>Category</th>
+          <th class="num">On hand</th><th class="num">Lots</th><th>Tracking</th>
+        </tr></thead>
+        <tbody id="rows"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<dialog id="dlg">
+  <div class="body">
+    <h3 id="dlg-title">Register a resource</h3>
+    <p class="muted" style="margin:0;font-size:13px">
+      Only a name is required. Everything else can be filled in later — but a
+      part number added now is one nobody has to reconcile afterwards.
+    </p>
+
+    <form id="form">
+      <fieldset>
+        <legend>Identity</legend>
+        <label class="field"><span class="label">Name</span>
+          <input id="f-name" required placeholder="Brushless motor, 2814 880kv" /></label>
+        <div class="row">
+          <label class="field"><span class="label">Part number</span>
+            <input id="f-part" class="mono" placeholder="T-MOTOR-2814-880" />
+            <span class="hint">Manufacturer's P/N. Unique within your organisation.</span></label>
+          <label class="field"><span class="label">Manufacturer</span>
+            <input id="f-manu" placeholder="T-Motor" /></label>
+        </div>
+        <div class="row">
+          <label class="field"><span class="label">Model</span>
+            <input id="f-model" placeholder="MN2814" /></label>
+          <label class="field"><span class="label">Revision</span>
+            <input id="f-rev" placeholder="Rev C" /></label>
+          <label class="field"><span class="label">Barcode / GTIN</span>
+            <input id="f-barcode" class="mono" placeholder="5012345678900" />
+            <span class="hint">Assigned by a numbering authority, not the maker.</span></label>
+        </div>
+        <label class="field"><span class="label">Description</span>
+          <input id="f-desc" placeholder="Primary lift motor, airframe A3" /></label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Stock</legend>
+        <div class="row">
+          <label class="field"><span class="label">Category</span>
+            <input id="f-cat" placeholder="propulsion" /></label>
+          <label class="field"><span class="label">Unit</span>
+            <input id="f-unit" placeholder="each" /></label>
+          <label class="field"><span class="label">Location</span>
+            <input id="f-loc" placeholder="bay-2 / shelf D" /></label>
+        </div>
+        <div class="row">
+          <label class="field"><span class="label">Quantity on hand</span>
+            <input id="f-qty" type="number" step="1" min="0" placeholder="0" /></label>
+          <label class="field"><span class="label">Reorder at</span>
+            <input id="f-threshold" type="number" step="1" min="0" placeholder="0" /></label>
+          <label class="field"><span class="label">Lead time (days)</span>
+            <input id="f-lead" type="number" step="any" min="0" placeholder="30" />
+            <span class="hint">How long resupply takes. Drives the cover warning.</span></label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Physical</legend>
+        <div class="row">
+          <label class="field"><span class="label">Unit mass (kg)</span>
+            <input id="f-mass" type="number" step="any" min="0" placeholder="0.082" />
+            <span class="hint">Needed to book this onto a capsule.</span></label>
+          <label class="field"><span class="label">Unit volume (m³)</span>
+            <input id="f-vol" type="number" step="any" min="0" placeholder="0.0004" /></label>
+          <label class="field"><span class="label">Shelf life (days)</span>
+            <input id="f-shelf" type="number" step="any" min="0" placeholder="730" />
+            <span class="hint">Proposes an expiry when a lot is received.</span></label>
+        </div>
+        <div class="check">
+          <input id="f-serial" type="checkbox" />
+          <label for="f-serial" style="font-size:13px">
+            Each unit needs its own serial
+            <span class="hint">For flight parts, traceable components and anything under warranty.
+              Lots are then created one per unit instead of one per batch.</span></label>
+        </div>
+        <label class="field" style="margin-top:12px"><span class="label">Datasheet URL</span>
+          <input id="f-datasheet" placeholder="https://…" /></label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Specification</legend>
+        <p class="muted" style="margin:0 0 10px;font-size:12.5px">
+          Attributes that matter for this kind of part. Voltage and cycles for a
+          battery, torque for an actuator, cultivar for seed — anything a fixed
+          set of fields would get wrong.
+        </p>
+        <div id="specs"></div>
+        <button type="button" class="ghost" id="addspec">Add attribute</button>
+      </fieldset>
+
+      <div class="err" id="err"></div>
+      <div class="actions">
+        <button type="submit" id="save">Register</button>
+        <button type="button" class="linkish" id="cancel" style="color:var(--dim)">Cancel</button>
+        <span class="muted" style="font-size:12px;margin-left:auto" id="editing"></span>
+      </div>
+    </form>
+  </div>
+</dialog>
+
+<script type="module">
+import { api, el, esc, setText, page } from "/static/js/wayfarer.js";
+
+let editingId = null;
+
+/* ---- Specification pairs ---- */
+function specRow(k = "", v = "") {
+  const d = document.createElement("div");
+  d.className = "specrow";
+  d.innerHTML = `
+    <input class="k" placeholder="attribute" value="${esc(k)}" />
+    <input class="v" placeholder="value" value="${esc(v)}" />
+    <button type="button" class="ghost drop" title="Remove">×</button>`;
+  d.querySelector(".drop").addEventListener("click", () => d.remove());
+  return d;
+}
+el("addspec").addEventListener("click", () => el("specs").appendChild(specRow()));
+
+function readSpecs() {
+  const out = {};
+  el("specs").querySelectorAll(".specrow").forEach((r) => {
+    const k = r.querySelector(".k").value.trim();
+    const v = r.querySelector(".v").value.trim();
+    if (k) out[k] = v;
+  });
+  return out;
+}
+
+/* ---- Dialog ---- */
+const F = (id) => el(id).value.trim();
+const num = (id) => (el(id).value === "" ? null : Number(el(id).value));
+const str = (id) => (F(id) === "" ? null : F(id));
+
+function openForm(entry) {
+  editingId = entry?.id ?? null;
+  setText("dlg-title", entry ? `Edit ${entry.name}` : "Register a resource");
+  setText("save", entry ? "Save changes" : "Register");
+  setText("editing", entry ? `on hand: ${entry.quantity} ${entry.unit} · ${entry.lot_count} lot(s)` : "");
+
+  const set = (id, v) => { el(id).value = v ?? ""; };
+  set("f-name", entry?.name); set("f-part", entry?.part_number);
+  set("f-manu", entry?.manufacturer); set("f-model", entry?.model);
+  set("f-rev", entry?.revision); set("f-barcode", entry?.barcode);
+  set("f-desc", entry?.description); set("f-cat", entry?.category);
+  set("f-unit", entry?.unit); set("f-loc", entry?.location);
+  set("f-qty", entry?.quantity); set("f-threshold", entry?.threshold);
+  set("f-lead", entry?.lead_time_days); set("f-mass", entry?.unit_mass_kg);
+  set("f-vol", entry?.unit_volume_m3); set("f-shelf", entry?.shelf_life_days);
+  set("f-datasheet", entry?.datasheet_url);
+  el("f-serial").checked = !!entry?.serialised;
+
+  // Quantity is set once at registration; afterwards it moves through the
+  // movements ledger so the level always has an explanation behind it.
+  el("f-qty").disabled = !!entry;
+  el("f-qty").title = entry ? "Changed through stock movements, not here" : "";
+
+  const specs = el("specs");
+  specs.innerHTML = "";
+  const s = entry?.specification ?? {};
+  const keys = Object.keys(s);
+  if (keys.length) keys.forEach((k) => specs.appendChild(specRow(k, s[k])));
+  else specs.appendChild(specRow());
+
+  el("err").textContent = "";
+  el("dlg").showModal();
+}
+
+el("add").addEventListener("click", () => openForm(null));
+el("cancel").addEventListener("click", () => el("dlg").close());
+
+el("form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const err = el("err"); err.textContent = "";
+  const btn = el("save"); btn.disabled = true;
+
+  const body = {
+    name: F("f-name"),
+    description: str("f-desc"), part_number: str("f-part"),
+    manufacturer: str("f-manu"), model: str("f-model"), revision: str("f-rev"),
+    barcode: str("f-barcode"), category: str("f-cat"), unit: str("f-unit"),
+    threshold: num("f-threshold"), location: str("f-loc"),
+    specification: readSpecs(), datasheet_url: str("f-datasheet"),
+    serialised: el("f-serial").checked,
+    shelf_life_days: num("f-shelf"), unit_mass_kg: num("f-mass"),
+    unit_volume_m3: num("f-vol"), lead_time_days: num("f-lead"),
+  };
+  if (!editingId) body.quantity = num("f-qty") ?? 0;
+
+  try {
+    await api(editingId ? `/catalogue/${editingId}` : "/catalogue", {
+      method: editingId ? "PUT" : "POST",
+      body: JSON.stringify(body),
+    });
+    el("dlg").close();
+    await refresh();
+  } catch (ex) {
+    err.textContent = ex.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+/* ---- List ---- */
+async function refresh() {
+  const rows = await api("/catalogue");
+  setText("count", `${rows.length} resource${rows.length === 1 ? "" : "s"}`);
+
+  const body = el("rows");
+  if (!rows.length) {
+    body.innerHTML = `<tr><td colspan="7" class="empty">
+      Nothing registered yet. Start with a part you reorder often — the part number is what every
+      later recall and warranty claim keys on.</td></tr>`;
+    return;
+  }
+
+  body.innerHTML = rows.map((r) => {
+    // Marked serialised but nothing serialised: the units on hand are not
+    // individually identifiable, which is the thing the flag promised.
+    const gap = r.serialised && r.lot_count === 0 && r.quantity > 0;
+    return `
+    <tr class="entry" data-id="${esc(r.id)}">
+      <td><strong>${esc(r.name)}</strong>
+        ${r.model ? `<div class="loc">${esc(r.model)}${r.revision ? ` · ${esc(r.revision)}` : ""}</div>` : ""}</td>
+      <td class="pn">${esc(r.part_number ?? "—")}</td>
+      <td class="loc">${esc(r.manufacturer ?? "—")}</td>
+      <td class="loc">${esc(r.category)}</td>
+      <td class="num">${esc(r.quantity)} <span class="loc">${esc(r.unit)}</span></td>
+      <td class="num">${esc(r.lot_count)}</td>
+      <td>${r.serialised
+          ? `<span class="pill ${gap ? "bad" : "ok"}">serialised</span>${
+              gap ? `<div class="loc" style="margin-top:3px">no serials recorded</div>` : ""}`
+          : `<span class="pill idle">bulk</span>`}</td>
+    </tr>`;
+  }).join("");
+
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  body.querySelectorAll("tr.entry").forEach((tr) =>
+    tr.addEventListener("click", () => openForm(byId.get(tr.dataset.id))));
+}
+
+page({
+  current: "catalogue.html",
+  ident: "catalogue",
+  blurb: "Sign in to register and edit resources.",
+  onReady: refresh,
+  intervalMs: 60000,
+});
+</script>
+</body>
+</html>

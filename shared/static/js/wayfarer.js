@@ -124,6 +124,7 @@ export function showApp() {
 export const PAGES = [
   ["console.html",    "Console",    "what needs me right now"],
   ["resources.html",  "Resources",  "every resource, everywhere"],
+  ["catalogue.html",  "Catalogue",  "what each resource is: part numbers, specs"],
   ["forecast.html",   "Resupply",   "what runs out, and when"],
   ["lots.html",       "Lots",       "batches, serials, expiry, recall"],
   ["market.html",     "Supply",     "orders, bids, settlement"],
