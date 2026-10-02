@@ -33,6 +33,7 @@ one problem.
 | [Org Boundaries](./Documentation/OrgBoundaries.md) | How two companies share one outpost without seeing each other's stock — what a trust grant can and can never carry. |
 | [Delay-Tolerant Messaging](./Documentation/DelayTolerantMessaging.md) | The envelope format, and why a message id, a lifetime and a destination all sit under the signature. Normative if you are writing a peer. |
 | [People & Messages](./Documentation/PeopleAndMessages.md) | Running accounts for your staff, and why a buyer↔seller conversation is anchored to an order rather than to a contact list. |
+| [TIDasToken (TIDAT)](./Documentation/Token.md) | What the token is for, what settlement actually verifies, and the long list of token features that are design intention rather than code. |
 | [Offline Settlement](./Documentation/OfflineSettlement.md) | Design for closing a trade where no chain is reachable. Not yet built. |
 | [Contributing](./Documentation/CONTRIBUTING.md) | How to build it, what the tests expect, and the conventions the code follows. |
 

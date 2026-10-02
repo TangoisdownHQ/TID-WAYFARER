@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -18,6 +19,12 @@ type Config struct {
 	PollInterval time.Duration // how often the forwarder scans dtn_outbox
 	HTTPTimeout  time.Duration // per-bundle delivery timeout
 	BatchSize    int           // max bundles claimed per loop iteration
+
+	// Whether to drain dtn_outbox at all. Off by default: this forwarder
+	// sends no fabric signature, so a current peer refuses every bundle it
+	// delivers, and its failed attempts back off rows the core-api forwarder
+	// would have delivered. See the package comment in main.go.
+	ForwarderEnabled bool
 }
 
 func loadConfig() (*Config, error) {
@@ -33,6 +40,10 @@ func loadConfig() (*Config, error) {
 		PollInterval: envDuration("POLL_INTERVAL", 5*time.Second),
 		HTTPTimeout:  envDuration("HTTP_TIMEOUT", 30*time.Second),
 		BatchSize:    envInt("BATCH_SIZE", 50),
+		// Off unless explicitly asked for. The core-api forwarder signs its
+		// requests; this one does not, so enabling it produces refused
+		// deliveries and delays the one that works.
+		ForwarderEnabled: envBool("RELAY_FORWARDER", false),
 	}, nil
 }
 
@@ -69,4 +80,19 @@ func envDuration(key string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+// envBool reads a boolean-ish environment variable. Accepts the spellings
+// people actually type rather than only Go's strconv set, because a config
+// flag that silently means "off" when someone wrote "on" is worse than no
+// flag.
+func envBool(key string, def bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "":
+		return def
+	case "1", "true", "yes", "on", "enabled":
+		return true
+	default:
+		return false
+	}
 }

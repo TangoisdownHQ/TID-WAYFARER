@@ -160,6 +160,12 @@ repository — the integration is an RPC client that reads and verifies, not a
 contract that holds funds. Treat every token function beyond verification as a
 design intention.
 
+There is also **no TIDAT mint deployed** on any chain, test or main, and the
+running stack has neither `SOLANA_RPC_URL` nor `TIDAT_MINT` set — so the
+verification path is correct code with nothing yet to verify against. Full
+status, including the trust model this implies and the known gaps:
+**[Token.md](./Token.md)**.
+
 ---
 
 ## Repository layout
@@ -286,5 +292,6 @@ graph TD
 | [Org Boundaries](./OrgBoundaries.md) | How two companies share one outpost; what a trust grant can never carry. |
 | [Delay-Tolerant Messaging](./DelayTolerantMessaging.md) | The envelope format and replay protection. Normative for a peer implementation. |
 | [People & Messages](./PeopleAndMessages.md) | Accounts, roles, and why a buyer↔seller thread is anchored to a deal. |
+| [TIDasToken (TIDAT)](./Token.md) | What settlement verifies, what it does not guarantee, and which token features are not built. |
 | [Offline Settlement](./OfflineSettlement.md) | Design for closing a trade with no chain reachable. Not built. |
 | [Contributing](./CONTRIBUTING.md) | Building it, what the tests expect, and the bugs that shaped the conventions. |

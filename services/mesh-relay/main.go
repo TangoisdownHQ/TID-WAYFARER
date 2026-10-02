@@ -1,18 +1,38 @@
 // tidasone-mesh — Go networking sidecar for TIDasONE.
 //
 // One process per outpost, runs next to the Rust core-api, shares the same
-// Postgres. Three responsibilities:
+// Postgres.
 //
-//  1. Poll dtn_outbox and POST bundles to peer outposts (the forwarder).
-//  2. Refuse POSTs to /inbox, which used to write dtn_inbox unauthenticated;
+// # Current state: the forwarder is off by default, and it has to be
+//
+// This process and the core-api both drained dtn_outbox. Two forwarders doing
+// one job is bad on its own; what made it a defect is that this one **cannot
+// authenticate**. It POSTs bundles with a Content-Type and two informational
+// headers and no fabric signature at all — no x-node-id, no x-node-timestamp,
+// no x-node-signature, no x-node-token. The core-api's /api/dtn/receive now
+// requires a named peer, so every bundle this forwarder delivers is refused.
+//
+// It then did active harm rather than merely failing. On a failed delivery it
+// bumps `attempts` and pushes `next_try_at` into the future — so a bundle it
+// could never deliver got backed off, and the Rust forwarder, which signs
+// correctly and *would* have delivered it, had to wait out a delay caused
+// entirely by this process losing the race to claim the row.
+//
+// So `RELAY_FORWARDER` defaults to `off`. Responsibilities while off:
+//
+//  1. Refuse POSTs to /inbox, which used to write dtn_inbox unauthenticated;
 //     reception belongs to the core-api's /api/dtn/receive (see inbox.go).
-//  3. Expose /health and /metrics for ops.
+//  2. Expose /health and /metrics for ops.
 //
-// Why a separate service? Network I/O fans out wide and gets retried often;
-// Go goroutines + the standard `net/http` client are tailor-made for that
-// shape, and keeping it out of the API process means a flaky peer can't
-// stall request handling. Both services treat the outbox/inbox tables as
-// the queue between them.
+// # Why this service exists at all
+//
+// The original reasoning is still sound: network I/O fans out wide and gets
+// retried often, Go's goroutines and net/http suit that shape, and keeping it
+// out of the API process means a flaky peer cannot stall request handling.
+// Turning it back on is a matter of teaching `forwarder.go` to sign requests
+// the way services/fabric_auth.rs does — canonical string over
+// method|path|timestamp|body-hash, Ed25519 over that, three headers. Until
+// then, enabling it only produces rejected deliveries and delayed ones.
 package main
 
 import (
@@ -52,20 +72,31 @@ func main() {
 
 	metrics := newMetrics()
 
-	fwd := &Forwarder{
-		DB:           db,
-		HTTPTimeout:  cfg.HTTPTimeout,
-		PollInterval: cfg.PollInterval,
-		BatchSize:    cfg.BatchSize,
-		NodeID:       cfg.NodeID,
-		Metrics:      metrics,
+	// Opt-in, and loudly, because an enabled forwarder here is currently a
+	// regression rather than extra capacity. See the package comment.
+	if cfg.ForwarderEnabled {
+		slog.Warn("forwarder ENABLED — it cannot sign fabric requests, so peers running "+
+			"a current build will refuse its deliveries, and its failures will delay the "+
+			"core-api forwarder by backing off rows it claimed",
+			"disable_with", "RELAY_FORWARDER=off")
+		fwd := &Forwarder{
+			DB:           db,
+			HTTPTimeout:  cfg.HTTPTimeout,
+			PollInterval: cfg.PollInterval,
+			BatchSize:    cfg.BatchSize,
+			NodeID:       cfg.NodeID,
+			Metrics:      metrics,
+		}
+		go fwd.Run(ctx)
+	} else {
+		slog.Info("forwarder disabled; the core-api drains dtn_outbox",
+			"enable_with", "RELAY_FORWARDER=on")
 	}
-	go fwd.Run(ctx)
 
 	inboxHandler := &InboxHandler{DB: db, Metrics: metrics}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/health", healthHandlerFor(cfg))
 	mux.Handle("/inbox", inboxHandler)
 	mux.Handle("/metrics", metrics.Handler())
 
@@ -100,8 +131,17 @@ func main() {
 	slog.Info("bye 👋")
 }
 
-func healthHandler(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"status":"ok","service":"tidasone-mesh-relay"}`))
+// Health says what this process is actually doing, not just that it is up.
+// A green check on a service whose only job is switched off is the kind of
+// reassurance that costs someone an afternoon.
+func healthHandlerFor(cfg *Config) http.HandlerFunc {
+	role := "metrics-only (forwarder disabled; core-api drains dtn_outbox)"
+	if cfg.ForwarderEnabled {
+		role = "forwarding (unsigned — peers on a current build will refuse these)"
+	}
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok","service":"tidasone-mesh-relay","role":"` + role + `"}`))
+	}
 }
