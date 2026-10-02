@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Wayfarer — Settings</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="/static/css/wayfarer.css" />
+<style>
+  .loc { color: var(--dim); font-family: var(--mono); font-size: 12px; }
+  tr.inactive td { opacity: .55; }
+  .rolepill { font-size: 11px; }
+  dialog {
+    border: 1px solid var(--edge-lit); border-radius: var(--r);
+    background: var(--panel); color: var(--ink); padding: 0; max-width: 560px; width: 92%;
+  }
+  dialog::backdrop { background: rgba(3,6,10,.72); }
+  dialog .body { padding: 20px 22px 22px; }
+  dialog h3 { margin: 0 0 6px; font-size: 16px; }
+  .actions { display: flex; gap: 9px; margin-top: 14px; }
+  .fieldrow { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; }
+  @media (max-width: 620px) { .fieldrow { grid-template-columns: 1fr; } }
+
+  /* A password shown exactly once needs to look like something to act on, not
+     like a status line to skim past. */
+  .oncebox {
+    border: 1px solid var(--signal); border-left-width: 3px; border-radius: 8px;
+    padding: 13px 15px; margin: 14px 0 2px;
+    background: linear-gradient(90deg, rgba(94,234,212,.08), transparent 70%);
+  }
+  .oncebox .pw {
+    font-family: var(--mono); font-size: 17px; letter-spacing: .5px;
+    margin: 7px 0 3px; user-select: all; word-break: break-all;
+  }
+  .warnbox {
+    border: 1px solid var(--dark); border-left-width: 3px; border-radius: 8px;
+    padding: 11px 13px; margin: 12px 0 14px; font-size: 12.5px;
+    background: linear-gradient(90deg, rgba(251,106,106,.08), transparent 70%);
+  }
+</style>
+</head>
+<body>
+
+<div id="login"></div>
+
+<div id="app" style="display:none">
+  <header></header>
+  <div class="wrap">
+    <div id="fabricbar"></div>
+    <div id="searchbar"></div>
+
+    <div class="rail" id="rail">
+      <div><span class="label">People here</span><div class="since" id="headcount">—</div></div>
+      <p class="muted" style="margin:0;font-size:13px;max-width:62ch" id="railnote"></p>
+    </div>
+
+    <!-- Shown only when this account is still on an issued password. -->
+    <div id="mustchange" class="warnbox" style="display:none">
+      Your password was set by an administrator. Change it below before doing
+      anything else — anyone who was in the room when it was read out can
+      currently sign in as you.
+    </div>
+
+    <div class="sectionhead" style="margin-top:22px"><h2>Your account</h2>
+      <span class="label" id="whoami">—</span></div>
+
+    <form id="pwform" style="max-width:520px">
+      <div class="fieldrow">
+        <label class="field"><span class="label">Current password</span>
+          <input id="pw-old" type="password" autocomplete="current-password" required /></label>
+        <label class="field"><span class="label">New password</span>
+          <input id="pw-new" type="password" autocomplete="new-password" minlength="10" required /></label>
+      </div>
+      <div class="err" id="pw-err"></div>
+      <div class="actions"><button type="submit">Change password</button></div>
+    </form>
+
+    <div class="sectionhead" style="margin-top:28px"><h2>People</h2>
+      <span class="label" id="addwrap">
+        <button class="linkish" id="add" type="button" style="color:var(--signal)">Add someone</button>
+      </span></div>
+
+    <p class="muted" style="margin:0 0 12px;font-size:13px;max-width:80ch">
+      Everyone listed belongs to your organisation, and only to it — this is not
+      a directory of everyone on the outpost. Accounts are deactivated rather
+      than deleted: a person who signed a custody receipt or released a hold is
+      named by those records, and a deleted account would leave a shipment
+      attested by nobody.
+    </p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>Name</th><th>Email</th><th>Role</th><th>Type</th>
+          <th>Last signed in</th><th></th>
+        </tr></thead>
+        <tbody id="people"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+    <div class="err" id="err" style="margin-top:10px"></div>
+  </div>
+</div>
+
+<dialog id="adddialog">
+  <div class="body">
+    <h3>Add someone to your organisation</h3>
+    <p class="muted" style="font-size:13px;margin:0 0 10px">
+      A one-time password is generated and shown once. There is no reset email:
+      an outpost may have no route to a mail server for days, so you read it to
+      them and they change it on first sign-in.
+    </p>
+    <form id="addform">
+      <div class="fieldrow">
+        <label class="field"><span class="label">Email</span>
+          <input id="a-email" type="email" required placeholder="name@company.example" /></label>
+        <label class="field"><span class="label">Full name</span>
+          <input id="a-name" type="text" placeholder="optional" /></label>
+      </div>
+      <div class="fieldrow">
+        <label class="field"><span class="label">Role in this organisation</span>
+          <select id="a-role">
+            <option value="operator" selected>operator — act on stock and shipments</option>
+            <option value="viewer">viewer — read only</option>
+            <option value="admin">admin — may also manage people</option>
+            <option value="owner">owner — cannot be deactivated</option>
+          </select></label>
+        <label class="field"><span class="label">Marketplace</span>
+          <select id="a-type">
+            <option value="buyer" selected>buyer</option>
+            <option value="seller">seller</option>
+            <option value="both">both</option>
+          </select></label>
+      </div>
+      <div class="err" id="a-err"></div>
+      <div class="actions">
+        <button type="submit">Create account</button>
+        <button type="button" class="linkish" id="a-cancel">Cancel</button>
+      </div>
+    </form>
+
+    <div class="oncebox" id="once" style="display:none">
+      <span class="label">Temporary password — shown once, not recoverable</span>
+      <div class="pw" id="once-pw"></div>
+      <p class="muted" style="font-size:12px;margin:4px 0 0">
+        Give this to <span id="once-who"></span>. If it is lost, issue a new one
+        with “Reset password”.
+      </p>
+      <div class="actions"><button type="button" id="once-done">Done</button></div>
+    </div>
+  </div>
+</dialog>
+
+<script type="module">
+import { api, page, el, setText, esc, ageSince } from "/static/js/wayfarer.js";
+
+const ROLE_TONE = { owner: "ok", admin: "ok", operator: "wait", viewer: "idle" };
+let canManage = false;
+
+async function loadPeople() {
+  const r = await api("/people");
+  canManage = r.canManage;
+  setText("headcount", r.count);
+  const rail = el("rail");
+  rail.className = "rail live";
+  setText("railnote", canManage
+    ? `You are ${r.myRole} here, so you can add people and reset passwords.`
+    : `You are ${r.myRole} here. Only an owner or admin can change who has access.`);
+  el("addwrap").style.display = canManage ? "" : "none";
+
+  const me = r.people.find((p) => p.isSelf);
+  if (me) {
+    el("whoami").textContent = `${me.fullName ?? me.username} · ${me.email} · ${me.orgRole}`;
+    el("mustchange").style.display = me.mustChangePassword ? "" : "none";
+  }
+
+  const body = el("people");
+  body.innerHTML = r.people.map((p) => `
+    <tr class="${p.active ? "" : "inactive"}">
+      <td>${esc(p.fullName ?? p.username)}${p.isSelf ? ` <span class="label">you</span>` : ""}</td>
+      <td class="mono" style="font-size:12px">${esc(p.email)}</td>
+      <td><span class="pill ${ROLE_TONE[p.orgRole] ?? "idle"} rolepill">${esc(p.orgRole)}</span></td>
+      <td class="loc">${esc(p.accountType ?? "—")}</td>
+      <td class="loc">${p.lastLoginAt ? esc(ageSince(p.lastLoginAt)) + " ago"
+          : p.mustChangePassword ? "never — password still unused" : "never"}</td>
+      <td style="white-space:nowrap">${renderActions(p)}</td>
+    </tr>`).join("");
+
+  body.querySelectorAll("button[data-act]").forEach((b) =>
+    b.addEventListener("click", () => act(b).catch(show)));
+}
+
+function renderActions(p) {
+  if (!canManage || p.isSelf) return "";
+  const parts = [
+    `<button class="linkish" data-act="reset" data-id="${esc(p.id)}" data-who="${esc(p.email)}"
+       style="color:var(--signal);font-size:12px">Reset password</button>`,
+  ];
+  // An owner has no deactivate control at all, rather than one that fails:
+  // offering a button that always refuses teaches people to ignore errors.
+  if (p.orgRole !== "owner") {
+    parts.push(`<button class="linkish" data-act="${p.active ? "off" : "on"}" data-id="${esc(p.id)}"
+       style="color:var(--${p.active ? "dark" : "lagging"});font-size:12px;margin-left:10px">
+       ${p.active ? "Deactivate" : "Restore"}</button>`);
+  }
+  return parts.join("");
+}
+
+async function act(b) {
+  const { act: a, id, who } = b.dataset;
+  if (a === "reset") {
+    if (!confirm(`Issue a new temporary password for ${who}? Their current one stops working.`)) return;
+    const r = await api(`/people/${id}/password`, { method: "POST", body: "{}" });
+    showOnce(r.temporaryPassword, who);
+    return;
+  }
+  const active = a === "on";
+  if (!active && !confirm("Deactivate this account? They will not be able to sign in. Their records stay.")) return;
+  await api(`/people/${id}/active`, { method: "PATCH", body: JSON.stringify({ active }) });
+  await loadPeople();
+}
+
+function showOnce(pw, who) {
+  el("once-pw").textContent = pw;
+  el("once-who").textContent = who;
+  el("once").style.display = "";
+  el("addform").style.display = "none";
+  el("adddialog").showModal();
+}
+
+el("add").addEventListener("click", () => {
+  el("a-err").textContent = "";
+  el("a-email").value = ""; el("a-name").value = "";
+  el("once").style.display = "none";
+  el("addform").style.display = "";
+  el("adddialog").showModal();
+});
+el("a-cancel").addEventListener("click", () => el("adddialog").close());
+el("once-done").addEventListener("click", async () => {
+  el("adddialog").close();
+  await loadPeople().catch(show);
+});
+
+el("addform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const err = el("a-err"); err.textContent = "";
+  try {
+    const r = await api("/people", {
+      method: "POST",
+      body: JSON.stringify({
+        email: el("a-email").value,
+        full_name: el("a-name").value || null,
+        org_role: el("a-role").value,
+        account_type: el("a-type").value,
+      }),
+    });
+    showOnce(r.temporaryPassword, r.email);
+  } catch (ex) { err.textContent = ex.message; }
+});
+
+el("pwform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const err = el("pw-err"); err.textContent = "";
+  try {
+    await api("/me/password", {
+      method: "POST",
+      body: JSON.stringify({
+        current_password: el("pw-old").value,
+        new_password: el("pw-new").value,
+      }),
+    });
+    el("pw-old").value = ""; el("pw-new").value = "";
+    err.style.color = "var(--live, #5eead4)";
+    err.textContent = "Password changed.";
+    await loadPeople();
+  } catch (ex) {
+    err.style.color = "";
+    err.textContent = ex.message;
+  }
+});
+
+function show(e) { el("err").textContent = e?.message ?? String(e); }
+
+page({
+  current: "settings.html",
+  ident: "settings",
+  blurb: "Sign in to manage your account and your people.",
+  onReady: loadPeople,
+  intervalMs: 60000,
+});
+</script>
+</body>
+</html>

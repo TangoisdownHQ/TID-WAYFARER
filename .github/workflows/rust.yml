@@ -79,9 +79,17 @@ jobs:
           echo "migrations are re-runnable"
 
       - name: Integration tests
-        # Without this the boundary tests skip silently, so CI would pass while
-        # one organisation could read another's inventory. These are the tests
-        # that found two real leaks.
+        # TEST_DATABASE_URL is what makes these run at all: without it they
+        # skip silently, so CI would report green while one organisation could
+        # read another's inventory. The boundary suite found two real leaks the
+        # first time it ran.
+        #
+        # Named individually rather than via `--tests` so that a suite being
+        # accidentally removed shows up as a missing target instead of as one
+        # fewer line of output nobody reads.
         env:
           TEST_DATABASE_URL: postgres://postgres:password@localhost:5432/tidasone_test
-        run: cargo test --test boundaries --verbose
+        run: |
+          cargo test --test boundaries --verbose
+          cargo test --test dtn_replay --verbose
+          cargo test --test chat_people --verbose

@@ -29,6 +29,9 @@ pub const JWT_SECRET: &str = "integration-test-secret";
 pub struct Harness {
     pub app: axum::Router,
     pub db: PgPool,
+    /// This outpost's own node id. The DTN tests need it to address an
+    /// envelope here, since an envelope addressed anywhere else is refused.
+    pub node_id: String,
 }
 
 /// Connect, or tell the caller to skip.
@@ -46,6 +49,11 @@ pub async fn harness() -> Option<Harness> {
     // everywhere; the fixtures below never reuse a name.
     std::env::set_var("JWT_SECRET", JWT_SECRET);
     std::env::set_var("SETTLEMENT_VERIFY", "off");
+    // Per-node signatures must be accepted, or no test can present itself as
+    // a peer and the DTN cases would all pass by being refused for the wrong
+    // reason.
+    std::env::set_var("FABRIC_AUTH", "both");
+    std::env::set_var("NODE_SHARED_SECRET", "integration-test-fabric-secret");
 
     let identity = NodeIdentity {
         node_id: Uuid::new_v4().to_string(),
@@ -60,7 +68,8 @@ pub async fn harness() -> Option<Harness> {
         identity,
     };
 
-    Some(Harness { app: tid_wayfarer::app::test_router(state), db })
+    let node_id = state.identity.node_id.clone();
+    Some(Harness { app: tid_wayfarer::app::test_router(state), db, node_id })
 }
 
 /// Skip the body of a test when there is no database, with a visible note.

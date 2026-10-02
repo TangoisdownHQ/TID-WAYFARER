@@ -25,8 +25,20 @@ places, replenishment that takes time, partners who need to see the same
 picture, and connectivity that can't be assumed. TID Wayfarer treats those as
 one problem.
 
-> 📖 Platform vision, token model, and module deep-dive:
-> [Documentation/Description.md](./Documentation/Description.md)
+### 📖 Documentation
+
+| Read this | If you want to know |
+|---|---|
+| [Description](./Documentation/Description.md) | The platform vision, the token model, and a module deep-dive. |
+| [Org Boundaries](./Documentation/OrgBoundaries.md) | How two companies share one outpost without seeing each other's stock — what a trust grant can and can never carry. |
+| [Delay-Tolerant Messaging](./Documentation/DelayTolerantMessaging.md) | The envelope format, and why a message id, a lifetime and a destination all sit under the signature. Normative if you are writing a peer. |
+| [People & Messages](./Documentation/PeopleAndMessages.md) | Running accounts for your staff, and why a buyer↔seller conversation is anchored to an order rather than to a contact list. |
+| [Offline Settlement](./Documentation/OfflineSettlement.md) | Design for closing a trade where no chain is reachable. Not yet built. |
+| [Contributing](./Documentation/CONTRIBUTING.md) | How to build it, what the tests expect, and the conventions the code follows. |
+
+Each of those explains the *reasoning*, not just the shape — usually including
+what the earlier version got wrong, because that is the part that tells you
+which constraints are real.
 
 ---
 
@@ -128,11 +140,60 @@ stock crosses its threshold; IPFS event ledger; DAO voting.
 - **Delay-Tolerant Networking** — `POST /api/dtn/send` queues per destination;
   the forwarder retries with exponential backoff until the outpost comes back
   into contact, landing payloads in the peer's inbox.
+- **Replay protection** — the envelope binds a message id, a `sent_at`, an
+  `expires_at` and the **destination**, all under the signature, with
+  length-prefixed canonical bytes so field boundaries cannot be moved. The
+  receiver remembers each `(sender, message id)` for the bundle's lifetime, so
+  delivery is **idempotent**: posting the same envelope twice stores one
+  message.
+
+  That matters for an honest reason before a hostile one. The forwarder retries
+  on a dropped connection, so it cannot tell a lost message from a lost
+  acknowledgement — duplicates are ordinary operation on a bad link, not just
+  an attack. A retransmit and a replay are indistinguishable at the door, so
+  both get the same answer and neither produces a second inbox row.
+
+  Unverified envelopes are now **refused rather than filed**, and
+  `/api/dtn/receive` requires a named peer — it previously sat behind the
+  general guard, which accepts a user token. Refusals are counted in
+  `dtn_rejected` with a reason, so "a peer needs upgrading" and "something is
+  replaying our traffic" are distinguishable.
+  ([spec and reasoning](./Documentation/DelayTolerantMessaging.md))
 - Each outpost's ML-KEM keypair persists (`keys/commsec.json`) and is exchanged
   during node registration alongside the Ed25519 identity. A peer on an older
   build with no KEM key on file still receives plaintext, flagged via
   `dtn_outbox.encrypted`, so a partially-upgraded fabric keeps working.
 - End-to-end test harness: `scripts/test_commsec.sh`.
+
+### 👥 People & Messages — Accounts and Conversations
+**Status: Implemented ✅**
+
+- **People administration** (`/api/people`, Settings page) — an org owner or
+  admin creates accounts inside **their own** organisation, sets the
+  organisation role (`owner` / `admin` / `operator` / `viewer`), resets
+  passwords and deactivates accounts. Previously an account could only come
+  into existence by signing itself up.
+- A new account gets a **one-time password shown exactly once**, read aloud
+  rather than emailed: an outpost may have no route to a mail server for days,
+  so a flow depending on delivered mail fails exactly when it is needed.
+- **Deactivation, never deletion** — someone who signed a custody receipt or
+  released a hold is named by those records, and a deleted row would leave a
+  shipment attested by nobody.
+- The outpost-level security role (`users.role`) is **not** settable here. An
+  org admin runs a company on the outpost, which is a different job from
+  administering the outpost; conflating them would let one customer's admin
+  reach every other customer's data.
+- **Conversations** (`/api/chat`, Messages page) — internal team channels,
+  direct messages between colleagues, and **buyer↔seller threads anchored to
+  an order or a bid**. A cross-company channel is authorised by the
+  transaction that justifies it, not by a directory: handing every participant
+  a list of every other organisation's staff would leak the org chart, which
+  is competitive information on a marketplace where the same companies bid
+  against each other.
+- Access is thread membership and nothing else — not org membership, so
+  someone who joins next month does not inherit a negotiation that closed last
+  month. Unread counts ride on the nav on every page.
+  ([details](./Documentation/PeopleAndMessages.md))
 
 ### 💠 TIDasToken (TIDAT)
 **Status: Settlement verification implemented 🧱** (on-chain escrow pending)
@@ -266,9 +327,31 @@ open  localhost:3000/ui/console.html
 ## 🔬 Testing
 
 ```bash
-SQLX_OFFLINE=true cargo test --lib   # unit tests
-./scripts/test_commsec.sh            # PQC end-to-end
+SQLX_OFFLINE=true cargo test --lib            # 114 unit tests, no database needed
+./scripts/test_commsec.sh                     # PQC end-to-end
+
+# Integration suites. These need a migrated Postgres; without TEST_DATABASE_URL
+# they skip rather than fail, so `cargo test` stays useful on a machine with no
+# database — a test that goes red for want of infrastructure trains people to
+# ignore red.
+export TEST_DATABASE_URL=postgres://postgres:…@localhost:5433/tidasone
+SQLX_OFFLINE=true cargo test --test boundaries    # 12 — organisation isolation
+SQLX_OFFLINE=true cargo test --test dtn_replay    # 11 — DTN replay protection
+SQLX_OFFLINE=true cargo test --test chat_people   # 11 — accounts and conversations
 ```
+
+`SQLX_OFFLINE=true` is not optional. `sqlx::query!` verifies every query against
+a live database **at compile time**; offline mode compiles against the committed
+query cache instead, which is also how the Docker image builds. Omit it with a
+`DATABASE_URL` pointing at an unmigrated database and you get dozens of errors
+that look like unrelated Rust problems.
+
+The integration suites are worth describing by what they found, not what they
+cover. `boundaries` found two real cross-organisation leaks (search and rollup)
+the first time it ran. `dtn_replay` forges envelopes deliberately — signing with
+a peer key, posting with real fabric transport headers — because a replay is
+indistinguishable from a legitimate retransmit at the HTTP layer, and only a
+genuinely signed request proves the server tells them apart.
 
 `test_commsec.sh` validates KEM keypair generation, encapsulation/decapsulation
 (shared-secret agreement), AEAD round-trips with and without Associated Data,
@@ -295,6 +378,19 @@ Shipped:
 - [x] Helm chart + Kubernetes operator (`Outpost` CRD)
 - [x] Cross-location resource rollup (`/api/rollup/inventory`) — read-only,
       provenance-carrying, honest about dark sites
+- [x] Parts catalogue: part numbers, supersession, supplier sourcing, life
+      limits, HS codes and storage conditions; barcode/QR capture
+- [x] Life limits surfaced per unit — cycles, hours or calendar days, against
+      whichever clock binds first
+- [x] Organisation boundaries enforced on every read, with an integration suite
+      that found two real leaks ([design](./Documentation/OrgBoundaries.md))
+- [x] Federated organisation trust — per-org roots, node certificates,
+      bilateral revocable grants, verifiable offline
+- [x] DTN replay protection — message identity, bundle lifetime and destination
+      under the signature; idempotent delivery
+      ([spec](./Documentation/DelayTolerantMessaging.md))
+- [x] People administration and buyer↔seller conversations anchored to a deal
+      ([details](./Documentation/PeopleAndMessages.md))
 
 Next — the logistics vision, in dependency order:
 
@@ -315,8 +411,19 @@ Next — the logistics vision, in dependency order:
 - [ ] **Partition reconciliation** — what happens when two disconnected
       outposts both allocate the last unit. Today there is no cross-outpost
       state replication, so the conflict can't even be detected.
-- [ ] **Cross-organization federation** — the fabric currently assumes one org
-      under one trust root; a real marketplace has independent parties.
+- [ ] **Chat over DTN** — a conversation currently lives on one outpost. The
+      schema carries `via_node_id` and the write path is shared so the DTN
+      receive side can insert messages, but the routing is not wired: two
+      people on different outposts cannot yet talk.
+- [ ] **Multi-hop DTN relaying** — the receiver requires the transport identity
+      to equal the envelope author, so a bundle cannot traverse an intermediate
+      outpost. True relaying needs a hop-by-hop layer around the end-to-end
+      envelope.
+- [ ] **Organisation-issued user credentials (SSO)** — accounts are per-outpost
+      today, so a person working across two outposts has two of them.
+- [ ] **Condition monitoring into life limits** — `cycles_used` and `hours_used`
+      are recorded by hand. Telemetry already arrives for fleet assets and
+      should accrue against the unit automatically.
 - [ ] Rules engine v2: compound conditions (AND/OR), rate-of-change triggers
 - [ ] SupplyLink escrow contracts + IPFS inventory proofs
 - [ ] AstroNet event ledger + DAO voting

@@ -56,6 +56,12 @@ pub struct LoginPayload {
 #[derive(Serialize)]
 pub struct JwtResponse {
     pub token: String,
+    /// True when an administrator set this password. The UI sends the operator
+    /// straight to a change form; the flag is the only record that the
+    /// password was issued rather than chosen, since the temporary one is
+    /// shown once and stored only as a hash.
+    #[serde(rename = "mustChangePassword")]
+    pub must_change_password: bool,
 }
 
 /// Signup returns a token as well, so a new account lands signed in rather
@@ -215,7 +221,10 @@ async fn login_user(
 
     // `role` is authoritative here — it decides whether the minted token can
     // reach AdminUser routes.
-    let row = sqlx::query("SELECT id, identity_hash, role FROM users WHERE lower(email) = $1")
+    let row = sqlx::query(
+        "SELECT id, identity_hash, role, active, must_change_password \
+         FROM users WHERE lower(email) = $1",
+    )
         .bind(&email)
         .fetch_optional(&state.db)
         .await
@@ -232,6 +241,8 @@ async fn login_user(
     let user_id: Uuid = r.get("id");
     let stored_hash: String = r.get("identity_hash");
     let role: String = r.get("role");
+    let active: bool = r.get("active");
+    let must_change_password: bool = r.get("must_change_password");
 
     let parsed = PasswordHash::new(&stored_hash).map_err(|_| {
         tracing::error!(user_id = %user_id, "stored password hash is unparseable");
@@ -245,8 +256,32 @@ async fn login_user(
         return Err(invalid());
     }
 
+    // Checked after the password, not before. A deactivated account gets a
+    // specific message because that is genuinely useful to the person
+    // holding it — but only once they have proved the password, so the
+    // endpoint still cannot be used to enumerate who works here.
+    if !active {
+        tracing::warn!(user_id = %user_id, "sign-in refused: account deactivated");
+        return Err((
+            StatusCode::FORBIDDEN,
+            "this account has been deactivated; ask an administrator to restore it".into(),
+        ));
+    }
+
+    // Best-effort: a failure here must not cost someone their session. It
+    // exists so "is anyone still using this account?" has an answer before
+    // somebody deactivates it.
+    if let Err(e) = sqlx::query("UPDATE users SET last_login_at = NOW() WHERE id = $1")
+        .bind(user_id)
+        .execute(&state.db)
+        .await
+    {
+        tracing::warn!(user_id = %user_id, error = %e, "could not record last_login_at");
+    }
+
     Ok(Json(JwtResponse {
         token: mint_token(&state, user_id, &role)?,
+        must_change_password,
     }))
 }
 

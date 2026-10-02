@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Wayfarer — Messages</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="/static/css/wayfarer.css" />
+<style>
+  /* Two columns: the list of conversations, and the open one. Collapses to a
+     single column on a narrow screen, where the list is above the thread. */
+  .chat { display: grid; grid-template-columns: 300px 1fr; gap: 14px; margin-top: 18px; }
+  @media (max-width: 860px) { .chat { grid-template-columns: 1fr; } }
+
+  .threads { border: 1px solid var(--edge); border-radius: var(--r); overflow: hidden; }
+  .thread {
+    display: block; width: 100%; text-align: left; background: none; border: 0;
+    border-bottom: 1px solid var(--edge); padding: 11px 13px; cursor: pointer;
+    color: var(--ink); font: inherit;
+  }
+  .thread:last-child { border-bottom: 0; }
+  .thread:hover { background: var(--panel); }
+  .thread.current { background: var(--panel); border-left: 3px solid var(--signal); padding-left: 10px; }
+  .thread .who { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+  .thread .name { font-weight: 600; font-size: 13.5px; }
+  .thread .when { color: var(--dim); font-size: 11px; font-family: var(--mono); white-space: nowrap; }
+  .thread .preview {
+    color: var(--dim); font-size: 12px; margin-top: 3px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .badge {
+    display: inline-block; min-width: 18px; text-align: center; font-size: 11px;
+    font-family: var(--mono); padding: 1px 5px; border-radius: 9px;
+    background: var(--signal); color: #04070b; font-weight: 700;
+  }
+
+  .room { border: 1px solid var(--edge); border-radius: var(--r); display: flex; flex-direction: column; min-height: 420px; }
+  .roomhead { padding: 12px 15px; border-bottom: 1px solid var(--edge); }
+  .roomhead h3 { margin: 0 0 3px; font-size: 15px; }
+  .log { flex: 1; overflow-y: auto; max-height: 52vh; padding: 14px 15px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 74%; }
+  .msg.mine { align-self: flex-end; }
+  .msg .meta { font-size: 11px; color: var(--dim); margin-bottom: 3px; }
+  .msg.mine .meta { text-align: right; }
+  .msg .text {
+    border: 1px solid var(--edge-lit); border-radius: 10px; padding: 8px 11px;
+    font-size: 13.5px; white-space: pre-wrap; word-break: break-word; background: var(--panel);
+  }
+  .msg.mine .text { border-color: var(--signal); background: rgba(94,234,212,.07); }
+  .relay { font-family: var(--mono); font-size: 10.5px; color: var(--lagging); }
+
+  .composer { border-top: 1px solid var(--edge); padding: 11px 13px; display: flex; gap: 9px; align-items: flex-end; }
+  .composer textarea {
+    flex: 1; resize: vertical; min-height: 40px; max-height: 160px;
+    background: var(--panel); color: var(--ink); border: 1px solid var(--edge-lit);
+    border-radius: 8px; padding: 9px 11px; font: inherit; font-size: 13.5px;
+  }
+  .chosen { color: var(--dim); font-size: 12px; }
+  dialog {
+    border: 1px solid var(--edge-lit); border-radius: var(--r);
+    background: var(--panel); color: var(--ink); padding: 0; max-width: 520px; width: 92%;
+  }
+  dialog::backdrop { background: rgba(3,6,10,.72); }
+  dialog .body { padding: 20px 22px 22px; }
+  dialog h3 { margin: 0 0 6px; font-size: 16px; }
+  .actions { display: flex; gap: 9px; margin-top: 12px; }
+  .peoplelist { display: flex; flex-direction: column; gap: 6px; max-height: 240px; overflow-y: auto; margin: 10px 0; }
+  .peoplelist label { display: flex; gap: 8px; align-items: center; font-size: 13.5px; }
+</style>
+</head>
+<body>
+
+<div id="login"></div>
+
+<div id="app" style="display:none">
+  <header></header>
+  <div class="wrap">
+    <div id="fabricbar"></div>
+    <div id="searchbar"></div>
+
+    <div class="rail" id="rail">
+      <div><span class="label">Unread</span><div class="since" id="unread">—</div></div>
+      <p class="muted" style="margin:0;font-size:13px;max-width:62ch" id="railnote"></p>
+    </div>
+
+    <div class="sectionhead" style="margin-top:22px"><h2>Conversations</h2>
+      <span class="label">
+        <button class="linkish" id="newdirect" type="button" style="color:var(--signal)">Message a colleague</button>
+        &nbsp;·&nbsp;
+        <button class="linkish" id="newteam" type="button" style="color:var(--signal)">Open team channel</button>
+      </span></div>
+
+    <p class="muted" style="margin:0 0 4px;font-size:13px;max-width:78ch">
+      You talk to colleagues directly, and to another company through the order
+      or bid it concerns — a buyer–seller conversation is opened from the
+      <a href="/static/market.html">Supply</a> page, beside the deal it is
+      about. That keeps a cross-company channel attached to a transaction
+      rather than to a directory of everybody's staff.
+    </p>
+
+    <div class="chat">
+      <div class="threads" id="threads">
+        <p class="empty" style="margin:0;padding:16px">Loading…</p>
+      </div>
+
+      <div class="room" id="room">
+        <div class="roomhead">
+          <h3 id="r-title">No conversation open</h3>
+          <span class="label" id="r-sub">Pick one on the left, or start a new one.</span>
+        </div>
+        <div class="log" id="log">
+          <p class="empty" style="margin:auto">Nothing open.</p>
+        </div>
+        <form class="composer" id="send" style="display:none">
+          <textarea id="body" placeholder="Write a message…" maxlength="4000"></textarea>
+          <button type="submit">Send</button>
+        </form>
+      </div>
+    </div>
+    <div class="err" id="err" style="margin-top:10px"></div>
+  </div>
+</div>
+
+<dialog id="pick">
+  <div class="body">
+    <h3 id="p-title">Message a colleague</h3>
+    <p class="muted" style="font-size:13px;margin:0 0 4px">
+      Everyone here is in your organisation. To reach another company, open the
+      conversation from the order or bid instead.
+    </p>
+    <form id="pform">
+      <div class="peoplelist" id="p-people"></div>
+      <label class="field"><span class="label">Subject (optional)</span>
+        <input id="p-subject" type="text" placeholder="e.g. cold-chain handover" /></label>
+      <div class="err" id="p-err"></div>
+      <div class="actions">
+        <button type="submit">Start</button>
+        <button type="button" class="linkish" id="p-cancel">Cancel</button>
+      </div>
+    </form>
+  </div>
+</dialog>
+
+<script type="module">
+import { api, page, el, setText, esc, ageSince } from "/static/js/wayfarer.js";
+
+let current = null;      // open thread id
+let lastId = 0;          // highest message id rendered, for incremental polls
+let people = [];
+
+/* Switching conversations resets the incremental cursor. Without this, opening
+ * a second thread would fetch "messages after <id from the first thread>" and
+ * silently show only part of it. */
+function openThread(id) {
+  current = id;
+  lastId = 0;
+  el("log").innerHTML = `<p class="empty" style="margin:auto">Loading…</p>`;
+  return loadRoom(true);
+}
+
+async function loadThreads() {
+  const r = await api("/chat");
+  setText("unread", r.unread);
+  const rail = el("rail");
+  rail.className = `rail ${r.unread ? "lagging" : "live"}`;
+  setText("railnote", r.unread
+    ? `${r.unread} message(s) you have not read.`
+    : r.count ? "Nothing unread." : "No conversations yet.");
+
+  const host = el("threads");
+  if (!r.count) {
+    host.innerHTML = `<p class="empty" style="margin:0;padding:16px">
+      No conversations yet. Message a colleague, or open one from a deal on the
+      Supply page.</p>`;
+    return;
+  }
+
+  host.innerHTML = r.threads.map((t) => {
+    const name = t.subject
+      || (t.kind === "deal" ? "Deal · " + (t.orgs ?? "counterparty")
+         : t.kind === "org" ? "Team channel"
+         : t.orgs ?? "Direct");
+    return `<button class="thread ${t.id === current ? "current" : ""}" data-id="${esc(t.id)}" type="button">
+      <span class="who">
+        <span class="name">${esc(name)}</span>
+        ${t.unread ? `<span class="badge">${esc(t.unread)}</span>`
+                   : `<span class="when">${esc(ageSince(t.lastMessageAt))}</span>`}
+      </span>
+      <span class="preview">${t.lastFrom ? esc(t.lastFrom) + ": " : ""}${esc(t.lastBody ?? "no messages yet")}</span>
+    </button>`;
+  }).join("");
+
+  host.querySelectorAll("button.thread").forEach((b) =>
+    b.addEventListener("click", () => openThread(b.dataset.id).catch(show)));
+}
+
+async function loadRoom(full = false) {
+  if (!current) return;
+  const r = await api(`/chat/${current}?after=${full ? 0 : lastId}`);
+
+  if (full) {
+    const who = r.participants.map((p) =>
+      `${esc(p.name ?? "someone")}${p.org ? ` <span class="label">${esc(p.org)}</span>` : ""}`
+    ).join(" · ");
+    setText("r-title", r.subject || (r.kind === "deal" ? "Deal conversation"
+                                   : r.kind === "org" ? "Team channel" : "Direct"));
+    el("r-sub").innerHTML = who + (r.orderId
+      ? ` · <a href="/static/market.html">order ${esc(String(r.orderId).slice(0, 8))}</a>` : "");
+    el("send").style.display = "flex";
+    el("log").innerHTML = "";
+  }
+
+  const log = el("log");
+  if (full && !r.messages.length) {
+    log.innerHTML = `<p class="empty" style="margin:auto">No messages yet. Say something.</p>`;
+    return;
+  }
+  if (r.messages.length) {
+    if (log.querySelector(".empty")) log.innerHTML = "";
+    log.insertAdjacentHTML("beforeend", r.messages.map((m) => `
+      <div class="msg ${m.mine ? "mine" : ""}">
+        <div class="meta">${esc(m.sender ?? "unknown")}${
+          m.senderOrg ? " · " + esc(m.senderOrg) : ""} · ${esc(ageSince(m.createdAt))} ago${
+          m.viaNodeId ? ` · <span class="relay">relayed</span>` : ""}</div>
+        <div class="text">${esc(m.body)}</div>
+      </div>`).join(""));
+    lastId = r.messages[r.messages.length - 1].id;
+    log.scrollTop = log.scrollHeight;
+    // Reading is what clears the badge; doing it on fetch rather than on a
+    // scroll event keeps "unread" meaning "not displayed to me".
+    await api(`/chat/${current}/read`, { method: "POST", body: "{}" });
+  }
+}
+
+function show(e) { el("err").textContent = e?.message ?? String(e); }
+
+el("send").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const box = el("body");
+  const text = box.value.trim();
+  if (!text || !current) return;
+  box.value = "";
+  try {
+    await api(`/chat/${current}/messages`, { method: "POST", body: JSON.stringify({ body: text }) });
+    await loadRoom();
+    await loadThreads();
+  } catch (ex) {
+    box.value = text;   // never silently lose what someone typed
+    show(ex);
+  }
+});
+
+/* Enter sends, shift+enter makes a line. The usual convention, and worth
+ * matching: an operator typing one-line updates should not need the mouse. */
+el("body").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    el("send").requestSubmit();
+  }
+});
+
+async function openPicker() {
+  const r = await api("/people");
+  people = r.people.filter((p) => !p.isSelf && p.active);
+  el("p-err").textContent = "";
+  el("p-subject").value = "";
+  el("p-people").innerHTML = people.length
+    ? people.map((p) => `<label><input type="checkbox" value="${esc(p.id)}" />
+        ${esc(p.fullName ?? p.username)} <span class="label">${esc(p.orgRole)}</span></label>`).join("")
+    : `<p class="muted" style="font-size:13px;margin:0">You are the only person in this
+        organisation. Add colleagues under <a href="/static/settings.html">Settings</a>.</p>`;
+  el("pick").showModal();
+}
+
+el("newdirect").addEventListener("click", () => openPicker().catch(show));
+el("p-cancel").addEventListener("click", () => el("pick").close());
+
+el("pform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const with_ = [...el("p-people").querySelectorAll("input:checked")].map((i) => i.value);
+  if (!with_.length) { el("p-err").textContent = "Pick at least one person."; return; }
+  try {
+    const t = await api("/chat", {
+      method: "POST",
+      body: JSON.stringify({ kind: "direct", with: with_, subject: el("p-subject").value || null }),
+    });
+    el("pick").close();
+    await loadThreads();
+    await openThread(t.id);
+  } catch (ex) { el("p-err").textContent = ex.message; }
+});
+
+el("newteam").addEventListener("click", async () => {
+  try {
+    const t = await api("/chat", { method: "POST", body: JSON.stringify({ kind: "org" }) });
+    await loadThreads();
+    await openThread(t.id);
+  } catch (ex) { show(ex); }
+});
+
+/* The thread list and the open conversation refresh together, so a reply
+ * arriving shows up in both places at once rather than one poll apart. */
+async function loadAll() {
+  // Arriving from the Supply page's "Message" button, which names the thread
+  // in the hash. Honoured only on the first pass, or every poll would yank the
+  // view back to it after someone clicked elsewhere.
+  const wanted = location.hash.slice(1);
+  if (wanted && !current) {
+    await loadThreads();
+    return openThread(wanted);
+  }
+  await loadThreads();
+  await loadRoom();
+}
+
+page({
+  current: "messages.html",
+  ident: "messages",
+  blurb: "Sign in to read your conversations.",
+  onReady: loadAll,
+  intervalMs: 8000,
+});
+</script>
+</body>
+</html>

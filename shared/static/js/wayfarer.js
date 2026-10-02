@@ -289,6 +289,8 @@ export const PAGES = [
   ["capsules.html",   "Capsules",   "shared hulls and manifests"],
   ["compliance.html", "Compliance", "certificates and holds"],
   ["map.html",        "Map",        "where things are"],
+  ["messages.html",   "Messages",   "colleagues, and the other side of a deal"],
+  ["settings.html",   "Settings",   "your account, and who else has one"],
 ];
 
 export function mountNav(current, ident) {
@@ -304,6 +306,25 @@ export function mountNav(current, ident) {
     </nav>`;
   const out = el("signout");
   if (out) out.addEventListener("click", logout);
+  markUnread();
+}
+
+/* The unread count rides on the nav rather than only on the Messages page,
+ * because a question from the other side of a deal is time-sensitive and
+ * nobody is going to sit on one tab waiting for it.
+ *
+ * Deliberately silent on failure: a chat endpoint that is down must not put an
+ * error on every page in the application. */
+async function markUnread() {
+  const link = document.querySelector('nav a[href$="messages.html"]');
+  if (!link) return;
+  try {
+    const { unread } = await api("/chat/unread");
+    link.textContent = unread ? `Messages (${unread})` : "Messages";
+    link.classList.toggle("has-unread", unread > 0);
+  } catch {
+    /* leave the label as it was */
+  }
 }
 
 /* ---- Fabric bar ----------------------------------------------------------

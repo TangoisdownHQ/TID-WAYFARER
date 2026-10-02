@@ -375,3 +375,7 @@ a.peer:hover { border-color: var(--signal); }
 .scanstatus { font-family: var(--mono); font-size: 12.5px; color: var(--dim); }
 
 @media (prefers-reduced-motion: reduce) { .scanframe { opacity: .9; } }
+
+/* An unread count in the nav. Coloured rather than bolded: the nav is already
+   dense, and weight alone does not read as "something is waiting". */
+nav a.has-unread { color: var(--signal); font-weight: 600; }

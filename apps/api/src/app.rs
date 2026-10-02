@@ -26,7 +26,9 @@ use crate::routes::{
     custody::custody_routes,
     dashboard::dashboard_routes,
     documents::document_routes,
+    chat::chat_routes,
     dtn::dtn_routes,
+    people::{own_password_route, people_routes},
     fabric::fabric_routes,
     fleet_map::fleet_map_routes,
     inventory::inventory_routes,
@@ -67,7 +69,10 @@ pub fn api_router(state: AppState) -> Router<AppState> {
     let guarded_routes = Router::new()
         .nest("/commsec", commsec_routes())
         .nest("/inventory", inventory_routes().merge(inventory_lot_routes()))
-        .nest("/me", me_routes())
+        // Changing your own password lives in `people`, which owns the hashing
+        // and the must-change flag; merged rather than nested separately,
+        // because two nests on one prefix conflict at router build.
+        .nest("/me", me_routes().merge(own_password_route()))
         .nest("/packages", package_routes())
         .nest("/assets", asset_routes().merge(asset_extras_routes()))
         .nest("/kits", kit_routes())
@@ -96,6 +101,8 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .nest("/peers", peer_routes())
         .nest("/ops", ops_routes())
         .nest("/dtn", dtn_routes())
+        .nest("/people", people_routes())
+        .nest("/chat", chat_routes())
         .nest("/fabric", fabric_routes())
         .nest("/map/fleet", fleet_map_routes())
         .nest("/map", map_routes())
