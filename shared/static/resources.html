@@ -17,6 +17,16 @@
   .caret { display: inline-block; width: 11px; color: var(--dim); font-family: var(--mono); }
   .partial { color: var(--unknown); font-family: var(--mono); font-size: 11px; }
   .short { color: var(--dark); font-family: var(--mono); font-size: 11px; }
+  /* A figure from a snapshot. Amber rather than red: it is usable, it is just
+     not current — and rendering it the same as a live figure is the mistake
+     this whole feature exists to avoid. */
+  .asof { color: var(--lagging); font-family: var(--mono); font-size: 11px; }
+  .staleward {
+    border: 1px solid var(--lagging); border-left-width: 3px; border-radius: 8px;
+    padding: 11px 13px; margin: 12px 0 2px; font-size: 12.5px; color: var(--ink);
+    background: linear-gradient(90deg, rgba(250,204,21,.08), transparent 70%);
+  }
+  tr.breakdown.staleline td { border-left: 2px solid var(--lagging); }
   button.reorder { color: var(--signal); font-size: 12px; white-space: nowrap; }
 
   dialog {
@@ -80,8 +90,12 @@
       <div class="card"><span class="label">Need reorder</span>
         <div class="v" id="k-low">—</div>
         <span class="loc" id="k-low-note"></span></div>
-      <div class="card"><span class="label">Locations reporting</span>
-        <div class="v" id="k-sources">—</div></div>
+      <div class="card"><span class="label">Locations counted</span>
+        <div class="v" id="k-sources">—</div>
+        <span class="loc" id="k-sources-note"></span></div>
+      <div class="card"><span class="label">Oldest figure</span>
+        <div class="v" id="k-oldest">—</div>
+        <span class="loc">how current this page is</span></div>
     </div>
 
     <div class="sectionhead">
@@ -89,10 +103,14 @@
       <span class="label">Click a row for locations</span>
     </div>
     <p class="muted" style="margin:0 0 14px;font-size:13px;max-width:74ch">
-      Totals are summed across every outpost that answered. A total is only a
-      count if coverage is complete — otherwise it is a floor. An item can be
-      healthy fabric-wide and still be out at the site that needs it, which is
-      what the reorder flag tracks.
+      Totals are summed across every outpost that answered, plus the last
+      reported figures from any that are out of contact — so a site on a weekly
+      uplink still counts instead of reading as empty. An amber
+      <span class="asof">as of</span> marks a figure that is not current, and
+      every line shows the age of its oldest part. A total is only a count when
+      everything is live; a total missing a site entirely is a floor. An item
+      can be healthy fabric-wide and still be out at the site that needs it,
+      which is what the reorder flag tracks.
     </p>
 
     <div class="tablewrap">
@@ -109,10 +127,11 @@
     <div class="tablewrap">
       <table>
         <thead><tr>
-          <th>Outpost</th><th>Status</th><th class="num">Data age</th>
+          <th>Outpost</th><th>Status</th><th class="num">Figure age</th>
+          <th class="num">Last asked</th>
           <th class="num">Items</th><th>Last contact</th><th>Detail</th>
         </tr></thead>
-        <tbody id="sources"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody>
+        <tbody id="sources"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
       </table>
     </div>
 
@@ -127,6 +146,9 @@
     <p class="muted" style="margin:0;font-size:13px">
       This posts an order to the marketplace. Outposts bid to carry it; you pick one.
     </p>
+
+    <!-- Shown only when the figures behind this order came from a snapshot. -->
+    <div class="staleward" id="ro-stale" style="display:none"></div>
 
     <div class="recap" id="ro-recap"></div>
 
@@ -161,8 +183,20 @@
 <script type="module">
 import { api, el, esc, age, ageSince, setText, boot , mountFabricBar, mountSearch , mountNav } from "/static/js/wayfarer.js";
 
-const SOURCE_TONE = { local: "ok", ok: "ok", unreachable: "bad" };
-const SOURCE_WORD = { local: "this outpost", ok: "reporting", unreachable: "out of contact" };
+/* Four states, deliberately. "Out of contact but we know what it had" and
+ * "out of contact and we have nothing" are different situations and an
+ * operator acts on them differently — collapsing both to "dark" is what made
+ * a weekly-uplink site look like an empty one. */
+const SOURCE_TONE = {
+  local: "ok", ok: "ok", stale: "wait", expired: "unknown", unreachable: "bad",
+};
+const SOURCE_WORD = {
+  local: "this outpost",
+  ok: "reporting",
+  stale: "dark · last known",
+  expired: "dark · too old to count",
+  unreachable: "dark · nothing known",
+};
 
 let expanded = new Set();
 
@@ -172,25 +206,41 @@ async function refresh() {
   // ---- coverage rail ----
   // "Complete" is the only state in which a total is a fact.
   const rail = el("rail");
-  rail.className = `rail ${r.complete ? "live" : "unknown"}`;
+  // Three states, because there are three. Everything live is a count. A
+  // snapshot filling in for a dark site makes the total uncertain in both
+  // directions. A site contributing nothing makes it a floor — and that is
+  // the worst of the three, so it wins the colour.
+  rail.className = `rail ${r.floor ? "unknown" : r.complete ? "live" : "lagging"}`;
   setText("coverage", r.complete
     ? `all ${r.sources_total} reporting`
-    : `${r.sources_answered} of ${r.sources_total} reporting`);
+    : `${r.sources_live} live · ${r.sources_stale} last-known · ${r.sources_missing} unknown`);
   setText("coverage-note", r.complete
-    ? "Every known location answered, so the totals below are counts."
-    : "Some locations are out of contact. Totals below are lower bounds — what "
-      + "they hold is unknown, not zero.");
+    ? "Every known location answered just now, so the totals below are counts."
+    : r.floor
+      ? `${r.sources_missing} location(s) contributed nothing — never heard from, or dark `
+        + `longer than ${Math.round(r.replica_horizon_seconds / 86400)} days. Totals below are `
+        + `lower bounds: what those sites hold is unknown, not zero.`
+      : `${r.sources_stale} location(s) are out of contact, counted at what they last `
+        + `reported. Those figures may have moved since — the totals are not a floor `
+        + `or a ceiling, just a mixture of ages. Each line shows its oldest part.`);
 
   setText("k-items", r.distinct_items);
   setText("k-sources", `${r.sources_answered}/${r.sources_total}`);
+  setText("k-sources-note", r.sources_stale
+    ? `${r.sources_stale} from last known` : r.complete ? "" : "");
+  const oldest = el("k-oldest");
+  oldest.textContent = r.oldest_contribution_seconds ? age(r.oldest_contribution_seconds) : "live";
+  oldest.className = `v ${r.oldest_contribution_seconds ? "dark" : ""}`;
 
   // A reorder count of 0 means "nothing is low" only when every site reported.
   // With a site dark, its shortages are invisible — so the tile takes the
   // known-unknowable colour rather than reading as all-clear.
   const low = el("k-low");
-  low.textContent = r.complete ? r.items_below_threshold : `${r.items_below_threshold}+?`;
-  low.className = `v ${r.complete ? (r.items_below_threshold ? "dark" : "") : "unknown"}`;
-  setText("k-low-note", r.complete ? "" : "dark sites not counted");
+  low.textContent = r.floor ? `${r.items_below_threshold}+?` : r.items_below_threshold;
+  low.className = `v ${r.floor ? "unknown" : r.items_below_threshold ? "dark" : ""}`;
+  setText("k-low-note", r.floor
+    ? "sites contributing nothing not counted"
+    : r.sources_stale ? "includes last-known figures" : "");
 
   // ---- items ----
   const body = el("items");
@@ -209,7 +259,8 @@ async function refresh() {
           <td>${esc(it.name)}</td>
           <td class="loc">${esc(it.category)}</td>
           <td class="num">${esc(it.total_quantity)}${
-            it.complete ? "" : ` <span class="partial" title="Some locations did not report">+?</span>`}</td>
+            it.floor ? ` <span class="partial" title="A location contributed nothing; this is a lower bound">+?</span>` : ""}${
+            it.stale_quantity ? ` <span class="asof" title="${esc(it.stale_quantity)} ${esc(it.unit)} of this is a last-known figure">as of ${esc(age(it.oldest_contribution_seconds))}</span>` : ""}</td>
           <td class="loc">${esc(it.unit)}</td>
           <td class="num">${it.by_location.length}</td>
           <td><span class="pill ${tone}">${word}</span></td>
@@ -220,9 +271,10 @@ async function refresh() {
           .slice()
           .sort((a, b) => b.shortfall - a.shortfall || a.quantity - b.quantity)
           .map((l, li) => `
-            <tr class="breakdown">
+            <tr class="breakdown${l.stale ? " staleline" : ""}">
               <td></td>
-              <td class="loc">${esc(l.outpost_name)}</td>
+              <td class="loc">${esc(l.outpost_name)}${
+                l.stale ? ` <span class="asof" title="Out of contact; figure as last reported">as of ${esc(age(l.age_seconds))}</span>` : ""}</td>
               <td class="loc">${esc(l.location ?? "—")}</td>
               <td class="num">${esc(l.quantity)}${
                 l.shortfall > 0 ? ` <span class="short">−${esc(l.shortfall)}</span>` : ""}</td>
@@ -261,6 +313,7 @@ async function refresh() {
       <td>${esc(s.name)}</td>
       <td><span class="pill ${SOURCE_TONE[s.status] ?? "idle"}">${SOURCE_WORD[s.status] ?? esc(s.status)}</span></td>
       <td class="num">${s.age_seconds === null || s.age_seconds === undefined ? "—" : esc(age(s.age_seconds))}</td>
+      <td class="num loc">${s.fetched_at ? esc(ageSince(s.fetched_at)) + " ago" : "—"}</td>
       <td class="num">${esc(s.item_count)}</td>
       <td class="loc">${s.last_seen ? esc(ageSince(s.last_seen)) + " ago" : "never"}</td>
       <td class="loc">${s.error ? esc(s.error) : ""}</td>
@@ -279,9 +332,23 @@ function openReorder(item, loc) {
   const where = loc.location ? `${loc.outpost_name} · ${loc.location}` : loc.outpost_name;
 
   el("ro-title").textContent = `Reorder ${item.name}`;
+
+  /* Ordering is a commitment, so the one place a last-known figure must not
+   * pass silently is here. The order is still allowed — a site that has been
+   * dark for a week may well be the one that needs stock most — but the
+   * quantity is presented as what it is, and the person pressing the button
+   * is told which. */
+  el("ro-stale").style.display = loc.stale ? "" : "none";
+  if (loc.stale) {
+    el("ro-stale").innerHTML = `${esc(loc.outpost_name)} is out of contact. These figures are
+      what it last reported, <strong>${esc(age(loc.age_seconds))} ago</strong> — the shortfall
+      below is a guess from that, and the site may have been restocked or run further down since.`;
+  }
+
   el("ro-recap").innerHTML = `
     <div><span class="k">Destination</span> <span class="v">${esc(where)}</span></div>
-    <div><span class="k">On hand</span> <span class="v">${esc(loc.quantity)} ${esc(item.unit)}</span></div>
+    <div><span class="k">On hand</span> <span class="v">${esc(loc.quantity)} ${esc(item.unit)}${
+      loc.stale ? ` <span class="asof">as of ${esc(age(loc.age_seconds))} ago</span>` : ""}</span></div>
     <div><span class="k">Reorder at</span> <span class="v">${esc(loc.threshold)} ${esc(item.unit)}</span></div>
     <div><span class="k">Short by</span> <span class="v" style="color:var(--dark)">${esc(loc.shortfall)} ${esc(item.unit)}</span></div>`;
 
@@ -325,7 +392,15 @@ el("ro-form").addEventListener("submit", async (e) => {
         // Which outpost actually needs it — the whole point of ordering
         // against a location rather than a fabric-wide total.
         requester_outpost: loc.node_id,
-        target_meta: { source: "rollup-reorder", resource: item.name, on_hand: loc.quantity },
+        target_meta: {
+          source: "rollup-reorder",
+          resource: item.name,
+          on_hand: loc.quantity,
+          // Recorded on the order so that six months later it is clear this
+          // quantity came from a last-known figure, not a live count.
+          on_hand_stale: loc.stale,
+          on_hand_age_seconds: loc.age_seconds,
+        },
       }),
     });
     el("ro-form").style.display = "none";

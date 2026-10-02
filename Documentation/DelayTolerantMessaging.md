@@ -223,6 +223,33 @@ This is also the one place where "a peer has not been upgraded"
 
 ---
 
+## The other receive path, which was the real hole
+
+While wiring the above, a second implementation turned up. The Go mesh-relay
+exposed `POST /inbox` on a port published to `0.0.0.0`, read a JSON envelope,
+and wrote the payload straight into `dtn_inbox`. No fabric authentication, no
+envelope signature, no replay check. Anything that could reach the port could
+put arbitrary rows in front of every consumer of the inbox, as many times as it
+liked — confirmed by posting one and watching it land.
+
+Its code carried the explanation: *"peers may post anonymously during bootstrap
+before HMAC is wired up."* A temporary state that became permanent, which is
+the usual way this happens.
+
+Hardening one of two implementations of a security-critical path just picks
+which one an attacker uses. So reception now belongs to the core-api alone, and
+the relay keeps the job it is actually better at — draining `dtn_outbox` and
+delivering to peers, where wide fan-out and frequent retries suit Go's
+concurrency model. `POST /inbox` answers **410 Gone** with the endpoint to use
+instead, and the function that wrote the table was deleted rather than left
+unused, so a future handler cannot quietly reintroduce the path.
+
+One loose end worth knowing about: both the Rust forwarder and the Go relay
+drain `dtn_outbox`. They can therefore deliver the same bundle twice. Since the
+replay protection above absorbs the second delivery, this is now waste rather
+than a correctness bug — but it is still two things doing one job, and one of
+them should be turned off.
+
 ## What this does not solve
 
 - **Relaying.** Step 2 requires the transport identity to equal the envelope

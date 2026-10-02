@@ -98,17 +98,16 @@ func (d *DB) BumpAttempt(ctx context.Context, tx pgx.Tx, id int64, nextTry time.
 	return err
 }
 
-// WriteInbox persists an incoming bundle. src_node_id is nullable — peers
-// may post anonymously during bootstrap before HMAC is wired up.
-func (d *DB) WriteInbox(ctx context.Context, srcNodeID string, payload json.RawMessage) error {
-	var src any
-	if srcNodeID == "" {
-		src = nil
-	} else {
-		src = srcNodeID
-	}
-	_, err := d.pool.Exec(ctx,
-		`INSERT INTO dtn_inbox (src_node_id, payload) VALUES ($1, $2)`,
-		src, payload)
-	return err
-}
+// WriteInbox is gone, deliberately.
+//
+// It inserted into dtn_inbox with no authentication of the sender and no
+// replay check, serving an endpoint published to 0.0.0.0. The comment it
+// carried — "peers may post anonymously during bootstrap before HMAC is wired
+// up" — described a temporary state that became permanent, which is the usual
+// way this happens.
+//
+// Reception now belongs to the core-api's POST /api/dtn/receive, which
+// verifies the sender's Ed25519 signature over an envelope that binds the
+// recipient and the bundle lifetime, and refuses a message id it has already
+// seen. Removing the function rather than leaving it unused means a future
+// handler cannot quietly reintroduce the path.

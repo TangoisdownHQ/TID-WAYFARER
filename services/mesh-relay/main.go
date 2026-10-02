@@ -4,7 +4,8 @@
 // Postgres. Three responsibilities:
 //
 //  1. Poll dtn_outbox and POST bundles to peer outposts (the forwarder).
-//  2. Receive POSTs to /inbox and write them into dtn_inbox.
+//  2. Refuse POSTs to /inbox, which used to write dtn_inbox unauthenticated;
+//     reception belongs to the core-api's /api/dtn/receive (see inbox.go).
 //  3. Expose /health and /metrics for ops.
 //
 // Why a separate service? Network I/O fans out wide and gets retried often;

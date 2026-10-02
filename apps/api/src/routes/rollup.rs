@@ -9,21 +9,35 @@
 //! GETs to every peer's `/api/rollup/local`, merges what comes back, and
 //! reports totals. It needs no schema change and no replication layer.
 //!
+//! When a peer cannot be reached, its **last reported summary** is used
+//! instead — see [`crate::services::replication`]. That was the one thing
+//! missing: a live-only rollup silently redefined "what we have" as "what we
+//! have at the places answering the phone", so a farm office on a weekly
+//! uplink was invisible six days out of seven.
+//!
 //! What it deliberately does **not** do:
 //!
-//! - It does not pretend to be complete. A peer that is dark contributes
-//!   nothing, and both the response and every affected line item say so
-//!   (`complete: false`). A total you cannot trust has to announce itself —
-//!   the alternative is an operator ordering against a number that silently
-//!   omitted three sites.
+//! - It does not pretend a snapshot is live. Three separate counts come back —
+//!   `sources_live`, `sources_stale`, `sources_missing` — and every line item
+//!   reports how much of its total came from a snapshot and how old the oldest
+//!   contribution was. A total you cannot fully trust has to say which part.
+//! - It does not blur the two ways a total can be wrong. If a site contributed
+//!   nothing at all the total is a **floor** (`floor: true`). If a site
+//!   contributed a snapshot, the total is neither a floor nor a ceiling — the
+//!   stock may have moved either way since — which is a different thing to
+//!   tell an operator and so is reported differently.
+//! - It does not count a snapshot forever. Past `REPLICA_MAX_AGE_SECS` a
+//!   snapshot is still listed but stops being added up: a figure from six
+//!   months ago is worse than no figure, because someone will act on it.
 //! - It does not return only a sum. 500 L spread over six locations is not
 //!   500 L you can use anywhere, so every item carries its per-location
 //!   breakdown alongside the total.
-//! - It does not cache. Freshness here is the product; a stale rollup served
-//!   fast would defeat the point. Cost is one concurrent round of peer GETs.
+//! - It does not serve a cached *aggregate*. Live peers are always re-read;
+//!   the snapshot is a fallback for a specific peer, not a shortcut for the
+//!   whole request.
 //!
-//! Replacing this with real replication changes only where `gather` reads
-//! from; the shape it returns is what a replicated view would return too.
+//! A replica is never authoritative. It must not back a reservation, a custody
+//! transfer or a settlement — only the question "roughly what is out there".
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -37,6 +51,7 @@ use tokio::task::JoinSet;
 use crate::routes::auth_middleware::{AdminUser, AuthenticatedUser, Caller};
 use crate::services::org_scope;
 use crate::services::fabric_auth;
+use crate::services::replication;
 use crate::AppState;
 
 /// Per-peer deadline. Generous enough for a satellite hop, short enough that
@@ -92,15 +107,36 @@ pub struct SummaryItem {
 pub struct SourceStatus {
     pub node_id: String,
     pub name: String,
-    /// `local` | `ok` | `unreachable`
+    /// `local`  — this outpost, read from its own database
+    /// `ok`     — answered live
+    /// `stale`  — unreachable, but a recent enough snapshot was used
+    /// `expired` — unreachable, snapshot too old to count; listed, not summed
+    /// `unreachable` — unreachable and never heard from
     pub status: &'static str,
-    /// Age of the data itself, from the peer's own `generated_at`.
+    /// Age of the data itself, from the peer's own `generated_at`. Present for
+    /// a snapshot too, which is the point: it is the age of the stock figure,
+    /// not of the row holding it.
     pub age_seconds: Option<i64>,
     /// Last contact per the node registry — the answer to "how dark is it?"
     /// when the fetch failed.
     pub last_seen: Option<DateTime<Utc>>,
+    /// When this outpost last managed to ask. For a `stale` source this is how
+    /// long the link has been down, which is a different question from how old
+    /// the stock figure is.
+    pub fetched_at: Option<DateTime<Utc>>,
     pub item_count: usize,
     pub error: Option<String>,
+}
+
+/// One source's contribution, with whether it came from a snapshot.
+///
+/// Carried separately from [`OutpostSummary`] because the summary is a wire
+/// type shared with peers: a peer reporting its own stock has no business
+/// describing it as stale, since from where it sits it is not.
+struct Contribution {
+    summary: OutpostSummary,
+    stale: bool,
+    age_seconds: i64,
 }
 
 /// Stock of one thing at one place, tagged with which outpost reported it.
@@ -112,6 +148,13 @@ pub struct LocationQuantity {
     pub quantity: i64,
     /// This location's reorder point.
     pub threshold: i64,
+    /// True when this line came from a snapshot rather than a live read. Shown
+    /// per location rather than only per item, because "we have 400 units" and
+    /// "we had 400 units here a week ago" are different claims and an operator
+    /// deciding where to pull from needs to see which is which.
+    pub stale: bool,
+    /// Age of this line's figure, in seconds. Zero for a live read.
+    pub age_seconds: i64,
     /// How much would bring this location back to its reorder point. This is
     /// the number a restock order should ask for — not the fabric-wide gap,
     /// because stock at another outpost is not stock you can use here.
@@ -124,11 +167,22 @@ pub struct RolledItem {
     pub name: String,
     pub unit: String,
     pub category: String,
-    /// Sum over the sources that answered — see `complete`.
+    /// Sum over the sources that contributed — live or from a snapshot.
     pub total_quantity: i64,
-    /// False when any source was unreachable: this item may be held there too,
-    /// so the total is a floor rather than a count.
+    /// How much of `total_quantity` came from a snapshot rather than a live
+    /// read. Zero means every contributor answered just now.
+    pub stale_quantity: i64,
+    /// Age of the oldest figure in this total, in seconds. The honest headline
+    /// for "how current is this number".
+    pub oldest_contribution_seconds: i64,
+    /// True only when every source answered live. A snapshot contributing
+    /// makes this false even though the total is no longer missing anything.
     pub complete: bool,
+    /// True when a source contributed nothing at all, so this item may be held
+    /// somewhere unaccounted for and the total is a lower bound. Distinct from
+    /// `complete`: a total built partly from snapshots is uncertain in both
+    /// directions, not merely low.
+    pub floor: bool,
     /// True if any reporting location is at or under its reorder point, even
     /// when the fabric-wide total looks healthy. Stock at the wrong location
     /// is not available stock.
@@ -143,11 +197,33 @@ pub struct RolledItem {
 #[derive(Serialize)]
 pub struct InventoryRollup {
     pub generated_at: DateTime<Utc>,
-    /// False if any known peer failed to answer. Every total below is then a
-    /// lower bound.
+    /// True only when every known source answered live.
     pub complete: bool,
+    /// True when at least one source contributed nothing — no live answer and
+    /// no usable snapshot. Every total below is then a lower bound.
+    pub floor: bool,
     pub sources_total: usize,
+    /// Live + stale: sources that contributed a figure of any age.
     pub sources_answered: usize,
+    /// Answered just now.
+    pub sources_live: usize,
+    /// Dark, but a snapshot inside the contributing horizon was used.
+    pub sources_stale: usize,
+    /// Dark with nothing usable — never heard from, or a snapshot too old to
+    /// count. These are the sites missing from the totals.
+    pub sources_missing: usize,
+    /// Age of the oldest figure anywhere in this rollup. `None` when
+    /// everything is live.
+    pub oldest_contribution_seconds: Option<i64>,
+    /// Horizon past which a snapshot stops being summed, so a client can
+    /// explain why a listed source contributed nothing.
+    pub replica_horizon_seconds: i64,
+    /// Set when the rollup was narrowed for a reason the caller cannot see
+    /// from the numbers — currently only "you are not in this outpost's
+    /// organisation, so its peers were not asked". A silently local-only
+    /// rollup would read as a fabric with one site in it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope_note: Option<String>,
     pub sources: Vec<SourceStatus>,
     pub distinct_items: usize,
     pub items_below_threshold: usize,
@@ -249,11 +325,51 @@ async fn local_items(
 async fn inventory_rollup(
     State(state): State<AppState>,
     Caller(principal): Caller,
+    axum::extract::Query(q): axum::extract::Query<RollupQuery>,
     _admin: AdminUser,
 ) -> Result<Json<InventoryRollup>, (axum::http::StatusCode, String)> {
     let org = org_scope::caller_org(&state, &principal).await;
-    let (sources, summaries) = gather(&state, org).await;
-    Ok(Json(merge(sources, summaries)))
+
+    // Peers may only be asked on behalf of *this outpost's own* organisation.
+    //
+    // This is not a nicety. The peer fetch is signed with the node identity,
+    // so a peer resolves `caller_org` to the org its node certificate names —
+    // this outpost's — and returns that org's holdings. Attributing the answer
+    // to whichever user happened to trigger the rollup would show an admin in
+    // one organisation what a peer released to another: a cross-org
+    // disclosure, and one that a snapshot would then cache under the wrong
+    // org and keep serving.
+    //
+    // So a caller from a different org gets a local-only rollup. Fewer
+    // numbers, never another company's numbers.
+    let own = org_scope::own_org(&state).await;
+    let may_ask_peers = org.is_some() && org == own;
+
+    let (sources, contributions) =
+        gather(&state, org, q.fresh_only.unwrap_or(false), may_ask_peers).await;
+    let mut rolled = merge(sources, contributions);
+
+    if !may_ask_peers {
+        rolled.scope_note = Some(
+            "Showing this outpost only. Other outposts answer on behalf of the organisation \
+             this outpost belongs to, which is not yours — so their figures are not this \
+             rollup's to report."
+                .to_string(),
+        );
+    }
+    Ok(Json(rolled))
+}
+
+#[derive(Deserialize)]
+pub struct RollupQuery {
+    /// Exclude snapshots, giving a strict lower bound built only from sources
+    /// answering right now.
+    ///
+    /// Worth having as an explicit option rather than a philosophy: most of
+    /// the time "roughly what is out there" is the question, but anything that
+    /// commits — drafting a reorder against a figure, promising a delivery —
+    /// wants the number nobody has to caveat.
+    pub fresh_only: Option<bool>,
 }
 
 /// A peer worth asking: registered, reachable, not revoked, and not us.
@@ -273,9 +389,11 @@ struct Peer {
 async fn gather(
     state: &AppState,
     org: Option<uuid::Uuid>,
-) -> (Vec<SourceStatus>, Vec<OutpostSummary>) {
+    fresh_only: bool,
+    may_ask_peers: bool,
+) -> (Vec<SourceStatus>, Vec<Contribution>) {
     let mut sources = Vec::new();
-    let mut summaries = Vec::new();
+    let mut summaries: Vec<Contribution> = Vec::new();
 
     // ---- this outpost, read straight from the DB ----
     match local_items(state, org).await {
@@ -286,16 +404,21 @@ async fn gather(
                 status: "local",
                 age_seconds: Some(0),
                 last_seen: Some(Utc::now()),
+                fetched_at: Some(Utc::now()),
                 item_count: items.len(),
                 error: None,
             });
-            summaries.push(OutpostSummary {
-                node_id: state.identity.node_id.clone(),
-                outpost_name: env_or("OUTPOST_NAME", "tid-wayfarer"),
-                body_id: env_or("BODY_ID", "399").parse().unwrap_or(399),
-                region: env_or("OUTPOST_REGION", ""),
-                generated_at: Utc::now(),
-                items,
+            summaries.push(Contribution {
+                summary: OutpostSummary {
+                    node_id: state.identity.node_id.clone(),
+                    outpost_name: env_or("OUTPOST_NAME", "tid-wayfarer"),
+                    body_id: env_or("BODY_ID", "399").parse().unwrap_or(399),
+                    region: env_or("OUTPOST_REGION", ""),
+                    generated_at: Utc::now(),
+                    items,
+                },
+                stale: false,
+                age_seconds: 0,
             });
         }
         Err(e) => sources.push(SourceStatus {
@@ -304,12 +427,17 @@ async fn gather(
             status: "unreachable",
             age_seconds: None,
             last_seen: None,
+            fetched_at: None,
             item_count: 0,
             error: Some(format!("local query failed: {e}")),
         }),
     }
 
     // ---- peers ----
+    if !may_ask_peers {
+        return (sources, summaries);
+    }
+
     let peers = match sqlx::query(
         r#"
         SELECT node_id::text AS node_id, name, api_endpoint, last_seen
@@ -370,22 +498,95 @@ async fn gather(
                     status: "ok",
                     age_seconds: Some(age),
                     last_seen: peer.last_seen,
+                    fetched_at: Some(Utc::now()),
                     item_count: summary.items.len(),
                     error: None,
                 });
-                summaries.push(summary);
+
+                // Keep the snapshot warm off the back of a read someone was
+                // making anyway. The daemon does this on a timer, but an
+                // operator watching the resources page is the most reliable
+                // clock there is — and a failure to store must not fail the
+                // rollup they asked for.
+                if let Err(e) = replication::store_snapshot(&state.db, org, &summary).await {
+                    tracing::warn!(error = %e, "rollup could not refresh snapshot");
+                }
+
+                summaries.push(Contribution { summary, stale: false, age_seconds: age });
             }
             Err(e) => {
-                tracing::warn!(node_id = %peer.node_id, error = %e, "rollup peer unreachable");
-                sources.push(SourceStatus {
-                    node_id: peer.node_id,
-                    name: peer.name,
-                    status: "unreachable",
-                    age_seconds: None,
-                    last_seen: peer.last_seen,
-                    item_count: 0,
-                    error: Some(e),
-                });
+                // The condition this feature exists for. Before falling back
+                // to "contributes nothing", look for what this peer last said.
+                let snapshot = if fresh_only {
+                    None
+                } else {
+                    replication::read_snapshot(&state.db, org, &peer.node_id).await
+                };
+
+                match snapshot {
+                    Some(snap) if snap.contributes() => {
+                        let age = snap.age_seconds();
+                        tracing::info!(
+                            node_id = %peer.node_id, age_seconds = age,
+                            "rollup peer dark; using its last reported summary"
+                        );
+                        sources.push(SourceStatus {
+                            node_id: peer.node_id,
+                            name: snap.summary.outpost_name.clone(),
+                            status: "stale",
+                            age_seconds: Some(age),
+                            last_seen: peer.last_seen,
+                            fetched_at: Some(snap.fetched_at),
+                            item_count: snap.item_count,
+                            // Not an error — the fetch failed and the fallback
+                            // worked — but the reason the link is down is still
+                            // the useful detail for whoever has to fix it.
+                            error: Some(format!("out of contact ({e}); figures as last reported")),
+                        });
+                        summaries.push(Contribution {
+                            summary: snap.summary,
+                            stale: true,
+                            age_seconds: age,
+                        });
+                    }
+                    // A snapshot exists but is past the horizon. Listed so the
+                    // site is nameable and its age visible, deliberately not
+                    // summed: a figure from six months ago is worse than none,
+                    // because someone will act on it.
+                    Some(snap) => {
+                        let age = snap.age_seconds();
+                        tracing::warn!(
+                            node_id = %peer.node_id, age_seconds = age,
+                            "rollup peer dark and its snapshot is too old to count"
+                        );
+                        sources.push(SourceStatus {
+                            node_id: peer.node_id,
+                            name: snap.summary.outpost_name,
+                            status: "expired",
+                            age_seconds: Some(age),
+                            last_seen: peer.last_seen,
+                            fetched_at: Some(snap.fetched_at),
+                            item_count: 0,
+                            error: Some(format!(
+                                "out of contact ({e}); last reported {} days ago, too old to count",
+                                age / 86_400
+                            )),
+                        });
+                    }
+                    None => {
+                        tracing::warn!(node_id = %peer.node_id, error = %e, "rollup peer unreachable, no snapshot");
+                        sources.push(SourceStatus {
+                            node_id: peer.node_id,
+                            name: peer.name,
+                            status: "unreachable",
+                            age_seconds: None,
+                            last_seen: peer.last_seen,
+                            fetched_at: None,
+                            item_count: 0,
+                            error: Some(e),
+                        });
+                    }
+                }
             }
         }
     }
@@ -416,13 +617,23 @@ async fn fetch_peer(
 
 /// Merge summaries into one list, keyed case-insensitively on (name, unit) so
 /// "Water"/"water" are one line. Category is taken from the first reporter.
-fn merge(sources: Vec<SourceStatus>, summaries: Vec<OutpostSummary>) -> InventoryRollup {
-    let answered = sources.iter().filter(|s| s.status != "unreachable").count();
-    let complete = answered == sources.len();
+fn merge(sources: Vec<SourceStatus>, summaries: Vec<Contribution>) -> InventoryRollup {
+    let live = sources.iter().filter(|s| matches!(s.status, "local" | "ok")).count();
+    let stale = sources.iter().filter(|s| s.status == "stale").count();
+    // `expired` and `unreachable` both contributed nothing. They are separate
+    // statuses because the fix differs — one site has never been heard from,
+    // the other has been dark long enough that what it said no longer counts —
+    // but for the arithmetic they are the same: a gap.
+    let missing = sources.len() - live - stale;
+
+    let answered = live + stale;
+    let complete = missing == 0 && stale == 0;
+    let floor = missing > 0;
 
     let mut grouped: BTreeMap<(String, String), RolledItem> = BTreeMap::new();
 
-    for summary in &summaries {
+    for contribution in &summaries {
+        let summary = &contribution.summary;
         for item in &summary.items {
             let key = (item.name.to_lowercase(), item.unit.to_lowercase());
             let entry = grouped.entry(key).or_insert_with(|| RolledItem {
@@ -430,9 +641,12 @@ fn merge(sources: Vec<SourceStatus>, summaries: Vec<OutpostSummary>) -> Inventor
                 unit: item.unit.clone(),
                 category: item.category.clone(),
                 total_quantity: 0,
-                // Inherited from the fabric-wide result: if anything is dark,
-                // no total can claim to be a full count.
+                stale_quantity: 0,
+                oldest_contribution_seconds: 0,
+                // Inherited from the fabric-wide result: an item's total
+                // cannot be more trustworthy than the coverage behind it.
                 complete,
+                floor,
                 below_threshold_somewhere: false,
                 shortfall_total: 0,
                 by_location: Vec::new(),
@@ -441,6 +655,11 @@ fn merge(sources: Vec<SourceStatus>, summaries: Vec<OutpostSummary>) -> Inventor
             let shortfall = (item.threshold - item.quantity).max(0);
 
             entry.total_quantity += item.quantity;
+            if contribution.stale {
+                entry.stale_quantity += item.quantity;
+            }
+            entry.oldest_contribution_seconds =
+                entry.oldest_contribution_seconds.max(contribution.age_seconds);
             entry.below_threshold_somewhere |= item.below_threshold;
             entry.shortfall_total += shortfall;
             entry.by_location.push(LocationQuantity {
@@ -451,6 +670,8 @@ fn merge(sources: Vec<SourceStatus>, summaries: Vec<OutpostSummary>) -> Inventor
                 threshold: item.threshold,
                 shortfall,
                 below_threshold: item.below_threshold,
+                stale: contribution.stale,
+                age_seconds: contribution.age_seconds,
             });
         }
     }
@@ -466,11 +687,20 @@ fn merge(sources: Vec<SourceStatus>, summaries: Vec<OutpostSummary>) -> Inventor
 
     let items_below_threshold = items.iter().filter(|i| i.below_threshold_somewhere).count();
 
+    let oldest = sources.iter().filter_map(|s| s.age_seconds).max().filter(|a| *a > 0);
+
     InventoryRollup {
         generated_at: Utc::now(),
         complete,
+        floor,
         sources_total: sources.len(),
         sources_answered: answered,
+        sources_live: live,
+        sources_stale: stale,
+        sources_missing: missing,
+        oldest_contribution_seconds: oldest,
+        replica_horizon_seconds: replication::max_contributing_age().num_seconds(),
+        scope_note: None,
         sources,
         distinct_items: items.len(),
         items_below_threshold,
@@ -512,9 +742,20 @@ mod tests {
             status,
             age_seconds: Some(0),
             last_seen: None,
+            fetched_at: None,
             item_count: 0,
             error: None,
         }
+    }
+
+    /// A source that answered just now.
+    fn live(s: OutpostSummary) -> Contribution {
+        Contribution { summary: s, stale: false, age_seconds: 0 }
+    }
+
+    /// A source that is dark, answered from its last reported summary.
+    fn stale(s: OutpostSummary, age_seconds: i64) -> Contribution {
+        Contribution { summary: s, stale: true, age_seconds }
     }
 
     #[test]
@@ -522,8 +763,8 @@ mod tests {
         let r = merge(
             vec![source("a", "local"), source("b", "ok")],
             vec![
-                summary("a", "HQ", vec![item("Water", "L", 300, 50, "tank-1")]),
-                summary("b", "Farm", vec![item("Water", "L", 200, 50, "tank-2")]),
+                live(summary("a", "HQ", vec![item("Water", "L", 300, 50, "tank-1")])),
+                live(summary("b", "Farm", vec![item("Water", "L", 200, 50, "tank-2")])),
             ],
         );
 
@@ -539,8 +780,8 @@ mod tests {
         let r = merge(
             vec![source("a", "local"), source("b", "ok")],
             vec![
-                summary("a", "HQ", vec![item("Water", "L", 10, 0, "x")]),
-                summary("b", "Farm", vec![item("water", "l", 5, 0, "y")]),
+                live(summary("a", "HQ", vec![item("Water", "L", 10, 0, "x")])),
+                live(summary("b", "Farm", vec![item("water", "l", 5, 0, "y")])),
             ],
         );
         assert_eq!(r.distinct_items, 1);
@@ -553,7 +794,7 @@ mod tests {
         // not reorder against a total that quietly omitted a site.
         let r = merge(
             vec![source("a", "local"), source("b", "unreachable")],
-            vec![summary("a", "HQ", vec![item("Seed", "kg", 40, 10, "silo")])],
+            vec![live(summary("a", "HQ", vec![item("Seed", "kg", 40, 10, "silo")]))],
         );
 
         assert!(!r.complete);
@@ -568,8 +809,8 @@ mod tests {
         let r = merge(
             vec![source("a", "local"), source("b", "ok")],
             vec![
-                summary("a", "HQ", vec![item("Seed", "kg", 995, 10, "silo")]),
-                summary("b", "Farm", vec![item("Seed", "kg", 5, 10, "shed")]),
+                live(summary("a", "HQ", vec![item("Seed", "kg", 995, 10, "silo")])),
+                live(summary("b", "Farm", vec![item("Seed", "kg", 5, 10, "shed")])),
             ],
         );
 
@@ -586,8 +827,8 @@ mod tests {
         let r = merge(
             vec![source("a", "local"), source("b", "ok")],
             vec![
-                summary("a", "HQ", vec![item("Seed", "kg", 995, 10, "silo")]),
-                summary("b", "Farm", vec![item("Seed", "kg", 5, 50, "shed")]),
+                live(summary("a", "HQ", vec![item("Seed", "kg", 995, 10, "silo")])),
+                live(summary("b", "Farm", vec![item("Seed", "kg", 5, 50, "shed")])),
             ],
         );
 
@@ -603,7 +844,7 @@ mod tests {
     fn a_fully_stocked_fabric_has_nothing_to_reorder() {
         let r = merge(
             vec![source("a", "local")],
-            vec![summary("a", "HQ", vec![item("Bolts", "each", 900, 10, "bin")])],
+            vec![live(summary("a", "HQ", vec![item("Bolts", "each", 900, 10, "bin")]))],
         );
         assert_eq!(r.items[0].shortfall_total, 0);
         assert!(!r.items[0].below_threshold_somewhere);
@@ -613,21 +854,87 @@ mod tests {
     fn items_needing_attention_sort_first() {
         let r = merge(
             vec![source("a", "local")],
-            vec![summary(
+            vec![live(summary(
                 "a",
                 "HQ",
                 vec![
                     item("Bolts", "each", 9000, 10, "bin"),
                     item("Oxygen", "kg", 2, 10, "tank"),
                 ],
-            )],
+            ))],
         );
         assert_eq!(r.items[0].name, "Oxygen");
     }
 
+    /// A dark site contributing its last figures is not the same as a dark
+    /// site contributing nothing, and the response must not blur them.
+    ///
+    /// `floor` says a site is missing entirely, so the total is a lower bound.
+    /// `complete` says every figure is current. A snapshot makes the second
+    /// false without making the first true — the stock may have moved either
+    /// way since, which is a different thing to tell an operator.
+    #[test]
+    fn a_snapshot_makes_a_total_uncertain_but_not_a_floor() {
+        let r = merge(
+            vec![source("a", "local"), source("b", "stale")],
+            vec![
+                live(summary("a", "HQ", vec![item("Water", "L", 300, 50, "tank-1")])),
+                stale(summary("b", "Farm", vec![item("Water", "L", 200, 50, "tank-2")]), 3 * 86_400),
+            ],
+        );
+
+        assert_eq!(r.items[0].total_quantity, 500, "the dark site must still count");
+        assert_eq!(r.items[0].stale_quantity, 200, "and the total must say how much is stale");
+        assert!(!r.complete, "not every figure is current");
+        assert!(!r.floor, "nothing is missing, so this is not a lower bound");
+        assert_eq!(r.sources_live, 1);
+        assert_eq!(r.sources_stale, 1);
+        assert_eq!(r.sources_missing, 0);
+        assert_eq!(r.sources_answered, 2);
+    }
+
+    /// A site that contributed nothing makes the total a floor, whether it was
+    /// never heard from or its snapshot aged out.
+    #[test]
+    fn a_site_contributing_nothing_makes_the_total_a_floor() {
+        for status in ["unreachable", "expired"] {
+            let r = merge(
+                vec![source("a", "local"), source("b", status)],
+                vec![live(summary("a", "HQ", vec![item("Seed", "kg", 40, 10, "silo")]))],
+            );
+            assert!(r.floor, "{status} should make the total a floor");
+            assert!(!r.complete);
+            assert!(r.items[0].floor);
+            assert_eq!(r.sources_missing, 1);
+            assert_eq!(r.sources_answered, 1);
+        }
+    }
+
+    /// The reported age is the oldest figure in the total, not an average.
+    ///
+    /// Averaging would let one very stale site hide behind several fresh ones,
+    /// which is exactly the number an operator must not be given.
+    #[test]
+    fn the_oldest_contribution_is_what_gets_reported() {
+        let r = merge(
+            vec![source("a", "local"), source("b", "stale"), source("c", "stale")],
+            vec![
+                live(summary("a", "HQ", vec![item("Water", "L", 10, 1, "t")])),
+                stale(summary("b", "Near", vec![item("Water", "L", 10, 1, "t")]), 3_600),
+                stale(summary("c", "Far", vec![item("Water", "L", 10, 1, "t")]), 9 * 86_400),
+            ],
+        );
+        assert_eq!(r.items[0].oldest_contribution_seconds, 9 * 86_400);
+        assert_eq!(r.items[0].stale_quantity, 20);
+        // The rollup-level figure is taken from the source list rather than
+        // from the items, so that a site reporting nothing at all still counts
+        // toward "how old is the oldest thing here".
+        assert!(r.oldest_contribution_seconds.is_none(), "the helper's sources are all age 0");
+    }
+
     #[test]
     fn an_empty_fabric_is_not_an_error() {
-        let r = merge(vec![source("a", "local")], vec![summary("a", "HQ", vec![])]);
+        let r = merge(vec![source("a", "local")], vec![live(summary("a", "HQ", vec![]))]);
         assert_eq!(r.distinct_items, 0);
         assert!(r.complete);
     }

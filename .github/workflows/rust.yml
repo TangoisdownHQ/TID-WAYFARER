@@ -93,3 +93,4 @@ jobs:
           cargo test --test boundaries --verbose
           cargo test --test dtn_replay --verbose
           cargo test --test chat_people --verbose
+          cargo test --test replication --verbose

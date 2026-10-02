@@ -47,6 +47,7 @@ use tid_wayfarer::services::sync_daemon::start_sync_daemon;
 use tid_wayfarer::services::telemetry_processor::run_telemetry_processor;
 use tid_wayfarer::services::command_engine::run_command_engine;
 use tid_wayfarer::services::dtn::run_dtn_forwarder;
+use tid_wayfarer::services::replication::run_replication_daemon;
 use tid_wayfarer::services::blockchain_feeder::run_blockchain_feeder;
 use tid_wayfarer::services::settlement::run_settlement_verifier;
 
@@ -175,6 +176,9 @@ async fn main() -> Result<(), sqlx::Error> {
     tokio::spawn(run_telemetry_processor(state.clone()));
     tokio::spawn(run_command_engine(state.clone()));
     tokio::spawn(run_dtn_forwarder(state.clone()));
+    // Keeps each peer's last reported stock on hand, so a dark site still
+    // counts in the rollup instead of silently dropping out of the total.
+    tokio::spawn(run_replication_daemon(state.clone()));
     tokio::spawn(run_registration(state.clone()));
     tokio::spawn(run_blockchain_feeder(state.clone()));
     tokio::spawn(run_settlement_verifier(state.clone()));

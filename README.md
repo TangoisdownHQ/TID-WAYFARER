@@ -117,9 +117,18 @@ Where everything is, what condition it's in, and what it holds:
   movement trails as GeoJSON.
 - Peer node registry and sync daemon (`/api/nodes`, `/api/nodes-sync`).
 
-Planned: **replication**, so a dark site's last-known stock still counts with
-an age attached rather than dropping out of the total; automatic reorder when
-stock crosses its threshold; IPFS event ledger; DAO voting.
+- **Replication** — a peer's last reported summary is kept locally and used
+  when that peer is unreachable, so a site on a weekly uplink still counts
+  instead of reading as empty. Age comes from the peer's own clock, so
+  re-reading a snapshot never makes the stock look fresher than it is. Past a
+  horizon (30 days by default) a snapshot is still listed but no longer summed,
+  because a figure from six months ago is worse than no figure — somebody will
+  act on it. A replica is never authoritative: it must not back a reservation,
+  a custody transfer or a settlement, and `?fresh_only=true` returns the strict
+  live-only floor for anything that commits.
+
+Planned: automatic reorder when stock crosses its threshold; IPFS event ledger;
+DAO voting.
 
 ### 🔐 CommSec — Secure Communications
 **Status: Implemented ✅**
@@ -327,7 +336,7 @@ open  localhost:3000/ui/console.html
 ## 🔬 Testing
 
 ```bash
-SQLX_OFFLINE=true cargo test --lib            # 114 unit tests, no database needed
+SQLX_OFFLINE=true cargo test --lib            # 120 unit tests, no database needed
 ./scripts/test_commsec.sh                     # PQC end-to-end
 
 # Integration suites. These need a migrated Postgres; without TEST_DATABASE_URL
@@ -338,7 +347,13 @@ export TEST_DATABASE_URL=postgres://postgres:…@localhost:5433/tidasone
 SQLX_OFFLINE=true cargo test --test boundaries    # 12 — organisation isolation
 SQLX_OFFLINE=true cargo test --test dtn_replay    # 11 — DTN replay protection
 SQLX_OFFLINE=true cargo test --test chat_people   # 11 — accounts and conversations
+SQLX_OFFLINE=true cargo test --test replication   #  8 — dark sites still counting
 ```
+
+Point `TEST_DATABASE_URL` at a **throwaway** database. The suites insert
+fixtures and do not clean up; run them against your dev database and the node
+registry fills with dark fixture peers that every rollup then waits to time
+out.
 
 `SQLX_OFFLINE=true` is not optional. `sqlx::query!` verifies every query against
 a live database **at compile time**; offline mode compiles against the committed
@@ -391,13 +406,15 @@ Shipped:
       ([spec](./Documentation/DelayTolerantMessaging.md))
 - [x] People administration and buyer↔seller conversations anchored to a deal
       ([details](./Documentation/PeopleAndMessages.md))
+- [x] **Replication — a dark site still counts.** Each peer's last reported
+      summary is held locally and used when the peer is unreachable, with the
+      age attached and summed separately. A total built partly from snapshots
+      is reported as uncertain in both directions; a total missing a site
+      entirely is reported as a floor. `?fresh_only=true` gives the strict
+      live-only figure for anything that commits.
 
 Next — the logistics vision, in dependency order:
 
-- [ ] **Replicated resource view** — the rollup above answers "what do we have,
-      everywhere" by fanning out live reads, which is honest but only works for
-      sites currently in contact. Replication would let a dark site's
-      last-known stock still count, with an age attached.
 - [ ] **Automatic replenishment** — low stock is *detected* per-outpost
       (`GET /api/inventory/low-stock`, and the rollup flags it fabric-wide) but
       nothing acts on it. Crossing a threshold should draft an order rather

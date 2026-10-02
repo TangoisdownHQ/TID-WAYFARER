@@ -47,6 +47,22 @@ export TEST_DATABASE_URL=postgres://postgres:…@localhost:5433/tidasone
 SQLX_OFFLINE=true cargo test --test boundaries    # organisation isolation
 SQLX_OFFLINE=true cargo test --test dtn_replay    # DTN replay protection
 SQLX_OFFLINE=true cargo test --test chat_people   # accounts and conversations
+SQLX_OFFLINE=true cargo test --test replication   # dark sites still counting
+```
+
+**Point `TEST_DATABASE_URL` at a throwaway database, never at your dev one.**
+The suites insert fixtures and do not clean up after themselves — they are
+written to be isolated by using fresh uuids, not by rolling back. Run them
+against your working database and it fills with fixture organisations, users
+and registry peers; the node registry in particular will show dozens of dark
+peers in the fabric bar and slow every rollup down while they time out.
+
+```bash
+docker exec tidasone-db-v2 psql -U postgres -c 'CREATE DATABASE wf_itest'
+for f in packages/db/migrations/*.sql; do
+  docker exec -i tidasone-db-v2 psql -U postgres -d wf_itest -q -v ON_ERROR_STOP=1 < "$f"
+done
+export TEST_DATABASE_URL=postgres://postgres:…@localhost:5433/wf_itest
 ```
 
 Without `TEST_DATABASE_URL` the integration suites **skip rather than fail**.
@@ -101,6 +117,12 @@ membership would sign in successfully, see nothing, and appear in no member
 list for an administrator to find. A remembered-but-unstored DTN message would
 be unrecoverable, because the sender's retransmit would be absorbed as a
 duplicate.
+
+**One implementation of a security-critical path, not two.** The Go relay had
+a second DTN receive endpoint with no authentication at all, next to a Rust one
+that verifies signatures and refuses replays. Hardening one of two just picks
+which one gets used. If a path must exist in two places, the second one has to
+be a client of the first, not a reimplementation of it.
 
 **On a store-and-forward link, a 2xx is sometimes the correct refusal.** The
 DTN forwarder retries on any non-2xx, so answering `409` to a duplicate or an
