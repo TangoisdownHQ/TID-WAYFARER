@@ -26,6 +26,8 @@ use crate::routes::{
     custody::custody_routes,
     dashboard::dashboard_routes,
     documents::document_routes,
+    addresses::address_routes,
+    carriers::carrier_routes,
     chat::chat_routes,
     dtn::dtn_routes,
     people::{own_password_route, people_routes},
@@ -103,6 +105,8 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .nest("/dtn", dtn_routes())
         .nest("/people", people_routes())
         .nest("/chat", chat_routes())
+        .nest("/addresses", address_routes())
+        .nest("/carriers", carrier_routes())
         .nest("/fabric", fabric_routes())
         .nest("/map/fleet", fleet_map_routes())
         .nest("/map", map_routes())

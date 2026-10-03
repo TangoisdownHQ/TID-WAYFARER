@@ -23,6 +23,8 @@ pub mod orders;
 pub mod rules;
 pub mod peers;
 pub mod ops;
+pub mod addresses;
+pub mod carriers;
 pub mod chat;
 pub mod dtn;
 pub mod people;

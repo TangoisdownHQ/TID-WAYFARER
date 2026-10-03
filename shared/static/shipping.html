@@ -1,0 +1,672 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Wayfarer — Shipping</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="/static/css/wayfarer.css" />
+<style>
+  .loc { color: var(--dim); font-family: var(--mono); font-size: 12px; }
+  .track { font-family: var(--mono); font-size: 12px; }
+  .cost { font-family: var(--mono); }
+  tr.exception td { color: var(--dark); }
+
+  /* A handover a carrier cannot sign for. Amber, never green: the tracking
+     number is third-party evidence, which is useful and is not a signature. */
+  .attested { color: var(--lagging); font-family: var(--mono); font-size: 10.5px; }
+
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 18px; }
+  @media (max-width: 900px) { .two { grid-template-columns: 1fr; } }
+
+  dialog {
+    border: 1px solid var(--edge-lit); border-radius: var(--r);
+    background: var(--panel); color: var(--ink); padding: 0; max-width: 620px; width: 94%;
+  }
+  dialog::backdrop { background: rgba(3,6,10,.72); }
+  dialog .body { padding: 20px 22px 22px; }
+  dialog h3 { margin: 0 0 6px; font-size: 16px; }
+  .actions { display: flex; gap: 9px; margin-top: 14px; }
+  .fieldrow { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; }
+  .fieldrow.three { grid-template-columns: 1fr 1fr 1fr; }
+  @media (max-width: 620px) { .fieldrow, .fieldrow.three { grid-template-columns: 1fr; } }
+
+  .warnbox {
+    border: 1px solid var(--dark); border-left-width: 3px; border-radius: 8px;
+    padding: 11px 13px; margin: 12px 0; font-size: 12.5px;
+    background: linear-gradient(90deg, rgba(251,106,106,.08), transparent 70%);
+  }
+  .notebox {
+    border: 1px solid var(--lagging); border-left-width: 3px; border-radius: 8px;
+    padding: 11px 13px; margin: 12px 0; font-size: 12.5px;
+    background: linear-gradient(90deg, rgba(250,204,21,.08), transparent 70%);
+  }
+  .rateopt {
+    display: flex; justify-content: space-between; gap: 10px; align-items: baseline;
+    border: 1px solid var(--edge); border-radius: 8px; padding: 9px 11px; margin-bottom: 7px;
+    cursor: pointer;
+  }
+  .rateopt:hover, .rateopt.on { border-color: var(--signal); background: var(--panel-2); }
+  .events { margin: 10px 0 0; padding: 0; list-style: none; font-size: 12.5px; }
+  .events li { padding: 5px 0; border-bottom: 1px solid var(--edge); }
+  .events li:last-child { border-bottom: 0; }
+</style>
+</head>
+<body>
+
+<div id="login"></div>
+
+<div id="app" style="display:none">
+  <header></header>
+  <div class="wrap">
+    <div id="fabricbar"></div>
+    <div id="searchbar"></div>
+
+    <div class="rail" id="rail">
+      <div><span class="label">In flight</span><div class="since" id="inflight">—</div></div>
+      <p class="muted" style="margin:0;font-size:13px;max-width:62ch" id="railnote"></p>
+    </div>
+
+    <p class="muted" style="margin:14px 0 0;font-size:13px;max-width:80ch">
+      A commercial carrier is a <strong>leg</strong>, not a marketplace
+      participant. UPS will never run an outpost or sign a receipt, so the
+      depot that shipped stays accountable: the custody chain records the
+      handover with the tracking number as evidence and marks it
+      <span class="attested">attested</span> rather than signed. Carrier cost
+      is fiat; the marketplace leg still settles in TIDAT.
+    </p>
+
+    <div class="sectionhead" style="margin-top:22px"><h2>Shipments</h2>
+      <span class="label">
+        <button class="linkish" id="new-ship" type="button" style="color:var(--signal)">Ship something</button>
+      </span></div>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>Carrier</th><th>Tracking</th><th>To</th>
+          <th class="num">Cost</th><th>Status</th><th>Last update</th><th></th>
+        </tr></thead>
+        <tbody id="shipments"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="two">
+      <div>
+        <div class="sectionhead"><h2>Addresses</h2>
+          <span class="label">
+            <button class="linkish" id="new-addr" type="button" style="color:var(--signal)">Add</button>
+          </span></div>
+        <p class="muted" style="margin:0 0 10px;font-size:12.5px">
+          Earth needs a postal address a carrier can rate. Anywhere else needs
+          coordinates — there is no postal network out there.
+        </p>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>Label</th><th>Where</th><th></th></tr></thead>
+            <tbody id="addresses"><tr><td colspan="3" class="empty">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div>
+        <div class="sectionhead"><h2>Carrier accounts</h2>
+          <span class="label">
+            <button class="linkish" id="new-acct" type="button" style="color:var(--signal)">Add</button>
+          </span></div>
+        <p class="muted" style="margin:0 0 10px;font-size:12.5px">
+          <strong>manual</strong> needs no API and works with no link: buy the
+          label on the carrier's own site and record the tracking number.
+          An aggregator adds live rates and automatic tracking on top.
+        </p>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>Carrier</th><th>Via</th><th>Rates</th></tr></thead>
+            <tbody id="accounts"><tr><td colspan="3" class="empty">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div class="err" id="err" style="margin-top:12px"></div>
+  </div>
+</div>
+
+<!-- Ship something -->
+<dialog id="shipdialog">
+  <div class="body">
+    <h3>Ship something</h3>
+    <form id="shipform">
+      <div class="fieldrow">
+        <label class="field"><span class="label">From</span>
+          <select id="s-from" required></select></label>
+        <label class="field"><span class="label">To</span>
+          <select id="s-to" required></select></label>
+      </div>
+      <div class="fieldrow three">
+        <label class="field"><span class="label">Carrier</span>
+          <select id="s-carrier">
+            <option value="ups">UPS</option>
+            <option value="usps">USPS</option>
+            <option value="fedex">FedEx</option>
+            <option value="dhl">DHL</option>
+          </select></label>
+        <label class="field"><span class="label">Service (optional)</span>
+          <input id="s-service" type="text" placeholder="e.g. ups_ground" /></label>
+        <label class="field"><span class="label">Weight (kg)</span>
+          <input id="s-weight" type="number" step="any" min="0" /></label>
+      </div>
+
+      <label class="field"><span class="label">Items being shipped (optional)</span>
+        <select id="s-items" multiple size="4"></select></label>
+      <span class="loc">Naming items checks whether the carrier will carry them —
+        lithium cells and hazard classes are the usual refusals.</span>
+
+      <div class="notebox" id="s-accept" style="display:none"></div>
+      <div class="warnbox" id="s-forbid" style="display:none"></div>
+
+      <div class="actions" style="margin-bottom:4px">
+        <button type="button" id="s-check">Check acceptance</button>
+        <button type="button" id="s-rate">Get rates</button>
+      </div>
+
+      <div id="s-rates"></div>
+
+      <label class="field" style="margin-top:10px">
+        <span class="label">Tracking number</span>
+        <input id="s-tracking" type="text" placeholder="paste it if you bought the label elsewhere" /></label>
+      <div class="fieldrow">
+        <label class="field"><span class="label">Cost</span>
+          <input id="s-cost" type="number" step="any" min="0" /></label>
+        <label class="field"><span class="label">Currency</span>
+          <input id="s-currency" type="text" value="USD" maxlength="3" /></label>
+      </div>
+      <span class="loc">With a tracking number this records a parcel already
+        handed over, and writes the custody handover now. Without one it is a
+        draft to buy a label for.</span>
+
+      <div class="err" id="s-err"></div>
+      <div class="actions">
+        <button type="submit">Record shipment</button>
+        <button type="button" class="linkish" id="s-cancel">Cancel</button>
+      </div>
+    </form>
+  </div>
+</dialog>
+
+<!-- Address -->
+<dialog id="addrdialog">
+  <div class="body">
+    <h3 id="a-title">Add an address</h3>
+    <form id="addrform">
+      <div class="fieldrow">
+        <label class="field"><span class="label">Label</span>
+          <input id="a-label" type="text" placeholder="Chicago depot" /></label>
+        <label class="field"><span class="label">Body</span>
+          <select id="a-body">
+            <option value="399" selected>Earth — postal address</option>
+            <option value="301">Moon — coordinates</option>
+            <option value="499">Mars — coordinates</option>
+          </select></label>
+      </div>
+
+      <div id="a-postal">
+        <div class="fieldrow">
+          <label class="field"><span class="label">Contact name</span>
+            <input id="a-name" type="text" /></label>
+          <label class="field"><span class="label">Company</span>
+            <input id="a-company" type="text" /></label>
+        </div>
+        <label class="field"><span class="label">Address line 1</span>
+          <input id="a-line1" type="text" /></label>
+        <label class="field"><span class="label">Address line 2</span>
+          <input id="a-line2" type="text" /></label>
+        <div class="fieldrow three">
+          <label class="field"><span class="label">City</span>
+            <input id="a-city" type="text" /></label>
+          <label class="field"><span class="label">State / region</span>
+            <input id="a-region" type="text" /></label>
+          <label class="field"><span class="label">Postcode</span>
+            <input id="a-postcode" type="text" /></label>
+        </div>
+        <div class="fieldrow three">
+          <label class="field"><span class="label">Country (ISO)</span>
+            <input id="a-country" type="text" maxlength="2" placeholder="US" /></label>
+          <label class="field"><span class="label">Phone</span>
+            <input id="a-phone" type="text" placeholder="required internationally" /></label>
+          <label class="field"><span class="label">Type</span>
+            <select id="a-residential">
+              <option value="">not known</option>
+              <option value="false">commercial</option>
+              <option value="true">residential</option>
+            </select></label>
+        </div>
+      </div>
+
+      <div id="a-coords" style="display:none">
+        <div class="fieldrow three">
+          <label class="field"><span class="label">Latitude</span>
+            <input id="a-lat" type="number" step="any" /></label>
+          <label class="field"><span class="label">Longitude</span>
+            <input id="a-lon" type="number" step="any" /></label>
+          <label class="field"><span class="label">Altitude (m)</span>
+            <input id="a-alt" type="number" step="any" /></label>
+        </div>
+      </div>
+
+      <div class="err" id="a-err"></div>
+      <div class="actions">
+        <button type="submit">Save</button>
+        <button type="button" class="linkish" id="a-cancel">Cancel</button>
+      </div>
+    </form>
+  </div>
+</dialog>
+
+<!-- Carrier account -->
+<dialog id="acctdialog">
+  <div class="body">
+    <h3>Add a carrier account</h3>
+    <form id="acctform">
+      <div class="fieldrow">
+        <label class="field"><span class="label">Carrier</span>
+          <select id="c-carrier">
+            <option value="ups">UPS</option>
+            <option value="usps">USPS</option>
+            <option value="fedex">FedEx</option>
+            <option value="dhl">DHL</option>
+          </select></label>
+        <label class="field"><span class="label">Reach it via</span>
+          <select id="c-provider">
+            <option value="manual" selected>manual — no API, works offline</option>
+            <option value="easypost">easypost — live rates and tracking</option>
+          </select></label>
+      </div>
+      <label class="field"><span class="label">Account number (for your invoices)</span>
+        <input id="c-ref" type="text" /></label>
+      <span class="loc">Credentials are not stored here. An aggregator key comes
+        from the server's environment, so a database dump cannot buy labels.</span>
+      <div class="err" id="c-err"></div>
+      <div class="actions">
+        <button type="submit">Add</button>
+        <button type="button" class="linkish" id="c-cancel">Cancel</button>
+      </div>
+    </form>
+  </div>
+</dialog>
+
+<!-- Tracking detail -->
+<dialog id="trackdialog">
+  <div class="body">
+    <h3 id="t-title">Shipment</h3>
+    <div class="label" id="t-sub"></div>
+    <ul class="events" id="t-events"></ul>
+    <div class="actions">
+      <button type="button" id="t-refresh">Check with the carrier</button>
+      <button type="button" class="linkish" id="t-close">Close</button>
+    </div>
+    <div class="err" id="t-err"></div>
+  </div>
+</dialog>
+
+<script type="module">
+import { api, page, el, setText, esc, ageSince } from "/static/js/wayfarer.js";
+
+const STATUS_TONE = {
+  draft: "idle", purchased: "wait", in_transit: "wait",
+  delivered: "ok", exception: "bad", cancelled: "idle",
+};
+const STATUS_WORD = {
+  draft: "draft — no label yet", purchased: "handed over",
+  in_transit: "in transit", delivered: "delivered",
+  exception: "needs attention", cancelled: "cancelled",
+};
+
+let addresses = [];
+let items = [];
+let chosenRate = null;
+let openShipment = null;
+
+function show(e) { el("err").textContent = e?.message ?? String(e); }
+
+/* ---- Shipments ---- */
+
+async function loadShipments() {
+  const r = await api("/carriers/shipments");
+  setText("inflight", r.inFlight);
+  const rail = el("rail");
+  const bad = r.shipments.filter((s) => s.status === "exception").length;
+  rail.className = `rail ${bad ? "dark" : r.inFlight ? "lagging" : "live"}`;
+  setText("railnote", bad
+    ? `${bad} shipment(s) need attention — a carrier reported a problem.`
+    : r.inFlight
+      ? `${r.inFlight} parcel(s) with a carrier. Status comes from the carrier, not from us.`
+      : r.count ? "Nothing in flight." : "No shipments yet.");
+
+  const body = el("shipments");
+  if (!r.count) {
+    body.innerHTML = `<tr><td colspan="7" class="empty">
+      No shipments yet. “Ship something” records a parcel — you need an address
+      to send from and one to send to.</td></tr>`;
+    return;
+  }
+
+  body.innerHTML = r.shipments.map((s) => `
+    <tr class="${s.status === "exception" ? "exception" : ""}">
+      <td>${esc(s.carrier.toUpperCase())}${s.service ? ` <span class="loc">${esc(s.service)}</span>` : ""}</td>
+      <td class="track">${s.trackingNumber
+          ? (s.trackingUrl
+              ? `<a href="${esc(s.trackingUrl)}" target="_blank" rel="noopener">${esc(s.trackingNumber)}</a>`
+              : esc(s.trackingNumber))
+          : "—"}</td>
+      <td>${esc(s.toLabel ?? s.toCity ?? "—")}${
+          s.toCountry ? ` <span class="loc">${esc(s.toCountry)}</span>` : ""}</td>
+      <td class="num cost">${s.costAmount != null ? `${esc(s.costAmount)} ${esc(s.costCurrency)}` : "—"}</td>
+      <td><span class="pill ${STATUS_TONE[s.status] ?? "idle"}">${esc(STATUS_WORD[s.status] ?? s.status)}</span>
+          ${s.status === "delivered" ? `<br><span class="attested">attested, not signed</span>` : ""}</td>
+      <td class="loc">${s.lastTrackedAt ? esc(ageSince(s.lastTrackedAt)) + " ago"
+          : s.shippedAt ? "shipped " + esc(ageSince(s.shippedAt)) + " ago" : "—"}</td>
+      <td style="white-space:nowrap">
+        <button class="linkish detail" data-id="${esc(s.id)}"
+          style="color:var(--signal);font-size:12px">Detail</button>
+        ${s.labelUrl ? `<a href="${esc(s.labelUrl)}" target="_blank" rel="noopener"
+          style="font-size:12px;margin-left:9px">Label</a>` : ""}
+      </td>
+    </tr>`).join("");
+
+  body.querySelectorAll("button.detail").forEach((b) =>
+    b.addEventListener("click", () => openDetail(b.dataset.id).catch(show)));
+}
+
+async function openDetail(id) {
+  openShipment = id;
+  const s = await api(`/carriers/shipments/${id}`);
+  setText("t-title", `${s.carrier.toUpperCase()} ${s.trackingNumber ?? "(no tracking yet)"}`);
+  el("t-sub").textContent =
+    `${STATUS_WORD[s.status] ?? s.status} · to ${s.toLabel ?? s.toCity ?? "—"}`
+    + (s.estimatedDelivery ? ` · due ${new Date(s.estimatedDelivery).toLocaleDateString()}` : "");
+  el("t-err").textContent = "";
+  el("t-events").innerHTML = s.events?.length
+    ? s.events.map((e) => `<li><strong>${esc(e.status)}</strong>
+        ${e.location ? ` · ${esc(e.location)}` : ""}
+        <span class="loc">${esc(ageSince(e.occurredAt))} ago</span>
+        ${e.detail ? `<br><span class="loc">${esc(e.detail)}</span>` : ""}</li>`).join("")
+    : `<li class="muted">No tracking events recorded. A manually recorded parcel has
+         none unless you check with the carrier yourself.</li>`;
+  el("trackdialog").showModal();
+}
+
+el("t-close").addEventListener("click", () => el("trackdialog").close());
+el("t-refresh").addEventListener("click", async () => {
+  if (!openShipment) return;
+  const err = el("t-err"); err.textContent = "";
+  try {
+    const r = await api(`/carriers/shipments/${openShipment}/track`, { method: "POST", body: "{}" });
+    await openDetail(openShipment);
+    await loadShipments();
+    if (!r.newEvents) err.textContent = "No new events since the last check.";
+  } catch (ex) { err.textContent = ex.message; }
+});
+
+/* ---- Addresses ---- */
+
+async function loadAddresses() {
+  const r = await api("/addresses");
+  addresses = r.addresses;
+
+  const body = el("addresses");
+  body.innerHTML = r.count
+    ? r.addresses.map((a) => `
+      <tr>
+        <td>${esc(a.label ?? a.company ?? "—")}</td>
+        <td class="loc">${esc(a.oneLine)}</td>
+        <td><button class="linkish del" data-id="${esc(a.id)}"
+          style="color:var(--dark);font-size:12px">Delete</button></td>
+      </tr>`).join("")
+    : `<tr><td colspan="3" class="empty">No addresses yet.</td></tr>`;
+
+  body.querySelectorAll("button.del").forEach((b) =>
+    b.addEventListener("click", async () => {
+      try {
+        await api(`/addresses/${b.dataset.id}`, { method: "DELETE" });
+        await loadAddresses();
+      } catch (ex) { show(ex); }
+    }));
+
+  // Keep the shipment form's pickers in step with the book.
+  const opts = addresses.map((a) =>
+    `<option value="${esc(a.id)}">${esc(a.label ?? a.company ?? a.oneLine)}</option>`).join("");
+  el("s-from").innerHTML = opts;
+  el("s-to").innerHTML = opts;
+}
+
+el("a-body").addEventListener("change", () => {
+  const earth = el("a-body").value === "399";
+  el("a-postal").style.display = earth ? "" : "none";
+  el("a-coords").style.display = earth ? "none" : "";
+});
+
+el("new-addr").addEventListener("click", () => {
+  el("addrform").reset();
+  el("a-err").textContent = "";
+  el("a-body").dispatchEvent(new Event("change"));
+  el("addrdialog").showModal();
+});
+el("a-cancel").addEventListener("click", () => el("addrdialog").close());
+
+el("addrform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const err = el("a-err"); err.textContent = "";
+  const res = el("a-residential").value;
+  try {
+    await api("/addresses", {
+      method: "POST",
+      body: JSON.stringify({
+        label: el("a-label").value || null,
+        body_id: Number(el("a-body").value),
+        name: el("a-name").value || null,
+        company: el("a-company").value || null,
+        line1: el("a-line1").value || null,
+        line2: el("a-line2").value || null,
+        city: el("a-city").value || null,
+        region: el("a-region").value || null,
+        postcode: el("a-postcode").value || null,
+        country: el("a-country").value || null,
+        phone: el("a-phone").value || null,
+        residential: res === "" ? null : res === "true",
+        lat: el("a-lat").value === "" ? null : Number(el("a-lat").value),
+        lon: el("a-lon").value === "" ? null : Number(el("a-lon").value),
+        alt: el("a-alt").value === "" ? null : Number(el("a-alt").value),
+      }),
+    });
+    el("addrdialog").close();
+    await loadAddresses();
+  } catch (ex) { err.textContent = ex.message; }
+});
+
+/* ---- Carrier accounts ---- */
+
+async function loadAccounts() {
+  const r = await api("/carriers/accounts");
+  el("accounts").innerHTML = r.count
+    ? r.accounts.map((a) => `
+      <tr>
+        <td>${esc(a.carrier.toUpperCase())}${a.accountRef ? ` <span class="loc">${esc(a.accountRef)}</span>` : ""}</td>
+        <td class="loc">${esc(a.provider)}</td>
+        <td><span class="pill ${a.online ? "ok" : "idle"}">${a.online ? "live rates" : "manual only"}</span></td>
+      </tr>`).join("")
+    : `<tr><td colspan="3" class="empty">No carrier accounts. You can still
+         record shipments by hand without one.</td></tr>`;
+}
+
+el("new-acct").addEventListener("click", () => {
+  el("acctform").reset(); el("c-err").textContent = "";
+  el("acctdialog").showModal();
+});
+el("c-cancel").addEventListener("click", () => el("acctdialog").close());
+el("acctform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const err = el("c-err"); err.textContent = "";
+  try {
+    await api("/carriers/accounts", {
+      method: "POST",
+      body: JSON.stringify({
+        carrier: el("c-carrier").value,
+        provider: el("c-provider").value,
+        account_ref: el("c-ref").value || null,
+      }),
+    });
+    el("acctdialog").close();
+    await loadAccounts();
+  } catch (ex) { err.textContent = ex.message; }
+});
+
+/* ---- Ship something ---- */
+
+el("new-ship").addEventListener("click", async () => {
+  if (addresses.length < 2) {
+    show(new Error("Add at least two addresses first — one to ship from, one to ship to."));
+    return;
+  }
+  el("shipform").reset();
+  el("s-currency").value = "USD";
+  el("s-err").textContent = "";
+  el("s-rates").innerHTML = "";
+  el("s-accept").style.display = "none";
+  el("s-forbid").style.display = "none";
+  chosenRate = null;
+
+  // Items are optional, and loading them must not block shipping.
+  try {
+    // /catalogue answers with a bare array, not an envelope.
+    items = await api("/catalogue?limit=200");
+    el("s-items").innerHTML = (items ?? []).map((i) =>
+      `<option value="${esc(i.id)}">${esc(i.name)}${
+        i.un_number ? ` — ${esc(i.un_number)}` : ""}</option>`).join("");
+  } catch {
+    el("s-items").innerHTML = "";
+  }
+  el("shipdialog").showModal();
+});
+el("s-cancel").addEventListener("click", () => el("shipdialog").close());
+
+const selectedItems = () =>
+  [...el("s-items").selectedOptions].map((o) => o.value);
+
+el("s-check").addEventListener("click", async () => {
+  const ids = selectedItems();
+  const err = el("s-err"); err.textContent = "";
+  el("s-accept").style.display = "none";
+  el("s-forbid").style.display = "none";
+  if (!ids.length) { err.textContent = "Pick the items to check first."; return; }
+  try {
+    const r = await api("/carriers/check", {
+      method: "POST",
+      body: JSON.stringify({
+        carrier: el("s-carrier").value,
+        service: el("s-service").value || null,
+        inventory_ids: ids,
+      }),
+    });
+    if (r.forbidden.length) {
+      el("s-forbid").style.display = "";
+      el("s-forbid").innerHTML = `<strong>${esc(el("s-carrier").value.toUpperCase())}
+        will not carry this.</strong><br>` + r.forbidden.map((f) =>
+        `${esc(f.item)}${f.unNumber ? ` (${esc(f.unNumber)})` : ""} — ${esc(f.note ?? "forbidden")}`
+      ).join("<br>");
+    }
+    if (r.requiresDeclaration.length) {
+      el("s-accept").style.display = "";
+      el("s-accept").innerHTML = `<strong>Accepted with paperwork.</strong><br>` +
+        r.requiresDeclaration.map((f) =>
+          `${esc(f.item)} — ${esc(f.note ?? "needs a dangerous-goods declaration")}`
+        ).join("<br>");
+    }
+    if (!r.forbidden.length && !r.requiresDeclaration.length) {
+      el("s-accept").style.display = "";
+      el("s-accept").innerHTML = "No recorded restrictions for these items on this carrier.";
+    }
+  } catch (ex) { err.textContent = ex.message; }
+});
+
+el("s-rate").addEventListener("click", async () => {
+  const err = el("s-err"); err.textContent = "";
+  el("s-rates").innerHTML = "";
+  const weight = el("s-weight").value;
+  if (!weight || Number(weight) <= 0) { err.textContent = "Enter a weight to rate."; return; }
+  try {
+    const r = await api("/carriers/rates", {
+      method: "POST",
+      body: JSON.stringify({
+        from_address_id: el("s-from").value,
+        to_address_id: el("s-to").value,
+        weight_kg: weight,
+      }),
+    });
+    el("s-rates").innerHTML = r.rates.map((q) => `
+      <div class="rateopt" data-quote="${esc(q.quoteId)}">
+        <span><strong>${esc(q.carrier.toUpperCase())}</strong>
+          <span class="loc">${esc(q.service)}</span></span>
+        <span class="cost">${esc(q.amount)} ${esc(q.currency)}${
+          q.transitDays ? ` <span class="loc">${esc(q.transitDays)} d</span>` : ""}</span>
+      </div>`).join("");
+    el("s-rates").querySelectorAll(".rateopt").forEach((d) =>
+      d.addEventListener("click", () => {
+        el("s-rates").querySelectorAll(".rateopt").forEach((x) => x.classList.remove("on"));
+        d.classList.add("on");
+        chosenRate = d.dataset.quote;
+      }));
+  } catch (ex) {
+    // The manual path is the expected answer here, not a failure.
+    err.textContent = ex.message;
+  }
+});
+
+el("shipform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const err = el("s-err"); err.textContent = "";
+  try {
+    const created = await api("/carriers/shipments", {
+      method: "POST",
+      body: JSON.stringify({
+        carrier: el("s-carrier").value,
+        service: el("s-service").value || null,
+        from_address_id: el("s-from").value,
+        to_address_id: el("s-to").value,
+        quote_id: chosenRate,
+        weight_kg: el("s-weight").value || null,
+        tracking_number: el("s-tracking").value || null,
+        cost_amount: el("s-cost").value || null,
+        cost_currency: el("s-currency").value || null,
+        inventory_ids: selectedItems(),
+      }),
+    });
+
+    // A draft with a chosen rate can be bought straight away; otherwise it
+    // stays a draft for someone to buy or record by hand.
+    if (created.status === "draft" && chosenRate) {
+      try {
+        await api(`/carriers/shipments/${created.id}/purchase`, { method: "POST", body: "{}" });
+      } catch (ex) {
+        err.textContent = `Shipment saved as a draft, but the label did not buy: ${ex.message}`;
+        await loadShipments();
+        return;
+      }
+    }
+    el("shipdialog").close();
+    await loadShipments();
+  } catch (ex) { err.textContent = ex.message; }
+});
+
+async function loadAll() {
+  await Promise.all([loadShipments(), loadAddresses(), loadAccounts()]);
+}
+
+page({
+  current: "shipping.html",
+  ident: "shipping",
+  blurb: "Sign in to ship and track parcels.",
+  onReady: loadAll,
+  intervalMs: 60000,
+});
+</script>
+</body>
+</html>

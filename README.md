@@ -176,6 +176,44 @@ DAO voting.
   `dtn_outbox.encrypted`, so a partially-upgraded fabric keeps working.
 - End-to-end test harness: `scripts/test_commsec.sh`.
 
+### 🚚 Carriers — UPS, USPS, FedEx, DHL as *legs*
+**Status: Implemented ✅**
+
+A commercial carrier is modelled as a subcontracted **leg** of a shipment, not
+as a marketplace participant. UPS will never run an outpost, hold a TIDAT
+wallet, or sign a custody receipt — so the depot that bid stays accountable
+end-to-end, and the carrier is how they fulfil it.
+
+- **It works with no marketplace at all.** An organisation shipping its own
+  stock to its own customers has no order and no bid, and still gets addresses,
+  labels, tracking and customs paperwork. That single-org case is the point:
+  the marketplace is what you grow into, not what you need before anything
+  works.
+- **Structured addresses** (`/api/addresses`) that extend the body model rather
+  than replacing it — `body_id` selects which half of a row is meaningful, so
+  Earth gets a postal address a carrier can rate and Mars still gets
+  coordinates. Validated against what a carrier needs *before* a carrier is
+  asked, so an outpost with no link still catches a missing country.
+- **The custody chain records a handover to a party that cannot sign**: null
+  `to_node_id`, the carrier and tracking number in `to_label`, and
+  `verified = false`. The tracking number is third-party-checkable evidence,
+  which is genuinely useful and is **not** a signature — filing it as one would
+  weaken every other receipt in the chain.
+- **Carrier acceptance checked off the catalogue.** `hazard_class` and
+  `un_number` were already modelled, and UN3480 (standalone lithium cells) is
+  the most common refusal there is — so USPS air is refused before a label is
+  bought, while FedEx ground comes back as "accepted with a declaration",
+  which is a different answer and reported as one.
+- **`manual` is the default provider** and needs no network: buy the label on
+  the carrier's own site and record the tracking number. An aggregator
+  (EasyPost) adds live rates, label purchase and automatic tracking on top —
+  one integration reaching all four carriers rather than four.
+- Tracking polling is **idempotent** (per-event `source_ref` with a unique
+  index), because polling is at-least-once and a re-poll would otherwise
+  duplicate the whole history.
+- Carrier cost is **fiat**; the marketplace leg still settles in TIDAT. Keeping
+  the two apart is what keeps a bid comparable.
+
 ### 👥 People & Messages — Accounts and Conversations
 **Status: Implemented ✅**
 
@@ -338,7 +376,7 @@ open  localhost:3000/ui/console.html
 ## 🔬 Testing
 
 ```bash
-SQLX_OFFLINE=true cargo test --lib            # 120 unit tests, no database needed
+SQLX_OFFLINE=true cargo test --lib            # 134 unit tests, no database needed
 ./scripts/test_commsec.sh                     # PQC end-to-end
 
 # Integration suites. These need a migrated Postgres; without TEST_DATABASE_URL
@@ -350,6 +388,7 @@ SQLX_OFFLINE=true cargo test --test boundaries    # 12 — organisation isolatio
 SQLX_OFFLINE=true cargo test --test dtn_replay    # 11 — DTN replay protection
 SQLX_OFFLINE=true cargo test --test chat_people   # 11 — accounts and conversations
 SQLX_OFFLINE=true cargo test --test replication   #  8 — dark sites still counting
+SQLX_OFFLINE=true cargo test --test carriers      # 14 — commercial carrier legs
 ```
 
 Point `TEST_DATABASE_URL` at a **throwaway** database. The suites insert
@@ -408,6 +447,10 @@ Shipped:
       ([spec](./Documentation/DelayTolerantMessaging.md))
 - [x] People administration and buyer↔seller conversations anchored to a deal
       ([details](./Documentation/PeopleAndMessages.md))
+- [x] **Commercial carriers as legs** — structured addresses, rating, labels,
+      idempotent tracking, hazmat acceptance off the catalogue, and custody
+      receipts for a party that cannot sign. Works with no marketplace, which
+      is the cold-start fix.
 - [x] **Replication — a dark site still counts.** Each peer's last reported
       summary is held locally and used when the peer is unreachable, with the
       age attached and summed separately. A total built partly from snapshots

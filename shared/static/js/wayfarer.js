@@ -289,6 +289,7 @@ export const PAGES = [
   ["capsules.html",   "Capsules",   "shared hulls and manifests"],
   ["compliance.html", "Compliance", "certificates and holds"],
   ["map.html",        "Map",        "where things are"],
+  ["shipping.html",   "Shipping",   "carriers, labels, tracking, addresses"],
   ["messages.html",   "Messages",   "colleagues, and the other side of a deal"],
   ["settings.html",   "Settings",   "your account, and who else has one"],
 ];
