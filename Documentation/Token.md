@@ -277,6 +277,15 @@ which is the [payee-is-a-person gap](#known-gaps) showing up in practice.
 
 ---
 
+## How to build out the rest
+
+Sequenced, with the one nearly-free step that unblocks everything else, the
+one that needs a decision from you before any code, and an argument against
+building several of the items above at all:
+**[TokenBuildPlan.md](./TokenBuildPlan.md)**.
+
+---
+
 ## Where the code is
 
 | What | Where |

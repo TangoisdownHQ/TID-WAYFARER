@@ -293,5 +293,6 @@ graph TD
 | [Delay-Tolerant Messaging](./DelayTolerantMessaging.md) | The envelope format and replay protection. Normative for a peer implementation. |
 | [People & Messages](./PeopleAndMessages.md) | Accounts, roles, and why a buyer↔seller thread is anchored to a deal. |
 | [TIDasToken (TIDAT)](./Token.md) | What settlement verifies, what it does not guarantee, and which token features are not built. |
+| [Token Build Plan](./TokenBuildPlan.md) | The order to build the token out in, and what not to build. |
 | [Offline Settlement](./OfflineSettlement.md) | Design for closing a trade with no chain reachable. Not built. |
 | [Contributing](./CONTRIBUTING.md) | Building it, what the tests expect, and the bugs that shaped the conventions. |
