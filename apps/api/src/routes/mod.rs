@@ -27,6 +27,7 @@ pub mod addresses;
 pub mod carriers;
 pub mod chat;
 pub mod dtn;
+pub mod keys;
 pub mod people;
 pub mod fabric;
 pub mod request_trace;

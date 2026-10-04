@@ -95,3 +95,4 @@ jobs:
           cargo test --test chat_people --verbose
           cargo test --test replication --verbose
           cargo test --test carriers --verbose
+          cargo test --test key_custody --verbose

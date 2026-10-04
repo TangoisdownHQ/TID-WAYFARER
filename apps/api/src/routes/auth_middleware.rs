@@ -306,10 +306,55 @@ async fn verify_signed_request(
     let message = fabric_auth::canonical_request(parts.method.as_str(), &path, ts, body);
 
     if verify_signature(&public_key, message.as_bytes(), signature) {
-        Ok(node_uuid)
-    } else {
-        Err(SigError::BadSignature)
+        return Ok(node_uuid);
     }
+
+    // --- The rollover window ---
+    //
+    // A key rotation cannot be atomic across a fabric, and the only workable
+    // order is: tell every peer first, install the new key last. During that
+    // window a peer which has already accepted the succession sees requests
+    // still signed by the *old* key — so a superseded key is accepted for a
+    // bounded time.
+    //
+    // Reaching for this at all means the current key failed, so it costs one
+    // indexed lookup on a path that was already an error. Two things keep it
+    // honest: `grace` is false when the rotation was recorded as a compromise,
+    // because a grace window on a stolen key is a grace window for the thief;
+    // and every acceptance is logged at warn, because a peer still signing
+    // with a retired key past the window is a misconfiguration somebody needs
+    // to see rather than a condition to absorb silently.
+    let grace_secs = crate::routes::nodes::key_grace_secs();
+    if grace_secs > 0 {
+        let superseded: Option<(String, chrono::DateTime<Utc>)> = sqlx::query_as(
+            "SELECT old_public_key, rotated_at FROM node_key_history \
+             WHERE node_id = $1 AND grace \
+               AND rotated_at > NOW() - make_interval(secs => $2) \
+             ORDER BY rotated_at DESC LIMIT 1",
+        )
+        .bind(node_uuid)
+        .bind(grace_secs as f64)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+
+        if let Some((previous_key, rotated_at)) = superseded {
+            if verify_signature(&previous_key, message.as_bytes(), signature) {
+                let age = (Utc::now() - rotated_at).num_seconds();
+                tracing::warn!(
+                    node_id = %node_uuid,
+                    rotated_secs_ago = age,
+                    grace_secs,
+                    "accepted a superseded key inside the rollover window — this peer has not \
+                     finished installing its new key"
+                );
+                return Ok(node_uuid);
+            }
+        }
+    }
+
+    Err(SigError::BadSignature)
 }
 
 #[cfg(test)]

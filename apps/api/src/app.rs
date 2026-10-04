@@ -29,6 +29,7 @@ use crate::routes::{
     addresses::address_routes,
     carriers::carrier_routes,
     chat::chat_routes,
+    keys::key_routes,
     dtn::dtn_routes,
     people::{own_password_route, people_routes},
     fabric::fabric_routes,
@@ -64,7 +65,11 @@ pub fn api_router(state: AppState) -> Router<AppState> {
     // Open: how a caller obtains a token, plus outpost identity for probes.
     let open_routes = Router::new()
         .nest("/auth", auth_routes())
-        .nest("/local-auth", local_auth_routes());
+        .nest("/local-auth", local_auth_routes())
+        // Key succession carries its own authority: the outgoing key signs for
+        // its successor. It cannot sit behind the fabric guard, because a node
+        // mid-rotation may be unable to present either key as a header.
+        .nest("/node-succession", crate::routes::nodes::succession_routes());
 
     // Guarded at the router level. Groups whose handlers already demand
     // AuthenticatedUser/AdminUser keep enforcing that on top.
@@ -102,6 +107,9 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .nest("/rules", rules_routes())
         .nest("/peers", peer_routes())
         .nest("/ops", ops_routes())
+        // Key custody: export a sealed identity bundle, and report whether
+        // this outpost could survive losing its volume.
+        .nest("/ops/keys", key_routes())
         .nest("/dtn", dtn_routes())
         .nest("/people", people_routes())
         .nest("/chat", chat_routes())

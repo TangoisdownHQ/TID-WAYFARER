@@ -143,9 +143,92 @@ fn init_tracing() {
     }
 }
 
+/// Seal or unseal the outpost's key bundle, then exit.
+///
+/// Here rather than in a shell script because `openssl enc` cannot do AEAD
+/// ciphers at all — so a script would have had to use CBC plus a hand-rolled
+/// HMAC, producing a *second* implementation of a security-critical format
+/// beside the one in `services::keyvault`. That is the same mistake as the
+/// unauthenticated relay inbox: two implementations means one of them is the
+/// weak one. This reuses the tested code, so there is exactly one format.
+///
+/// Needs no database, which is what lets a restore run against a stopped
+/// outpost.
+fn run_key_subcommand(cmd: &str) -> std::process::ExitCode {
+    use tid_wayfarer::services::keyvault;
+
+    let Ok(passphrase) = std::env::var("BACKUP_PASSPHRASE") else {
+        eprintln!("BACKUP_PASSPHRASE is not set");
+        return std::process::ExitCode::from(2);
+    };
+
+    match cmd {
+        "keys-seal" => {
+            let name = std::env::var("OUTPOST_NAME").unwrap_or_else(|_| "tid-wayfarer".into());
+            match keyvault::bundle_from_disk(&name).and_then(|b| keyvault::seal(&b, &passphrase)) {
+                Ok(sealed) => {
+                    // stdout is the archive's contents; everything else goes to
+                    // stderr so a redirect cannot capture a log line into the
+                    // sealed file.
+                    println!("{}", serde_json::to_string(&sealed).unwrap());
+                    std::process::ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("could not seal the key bundle: {e}");
+                    std::process::ExitCode::FAILURE
+                }
+            }
+        }
+        "keys-unseal" => {
+            let mut raw = String::new();
+            if let Err(e) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut raw) {
+                eprintln!("could not read the sealed bundle from stdin: {e}");
+                return std::process::ExitCode::FAILURE;
+            }
+            let sealed: keyvault::SealedBundle = match serde_json::from_str(&raw) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("that is not a sealed bundle: {e}");
+                    return std::process::ExitCode::FAILURE;
+                }
+            };
+            match keyvault::open(&sealed, &passphrase).and_then(|b| {
+                let node = b.node_id.clone();
+                keyvault::write_to_disk(&b).map(|_| node)
+            }) {
+                Ok(node_id) => {
+                    eprintln!("restored identity {node_id}");
+                    // The node id on stdout so the caller can check it against
+                    // the manifest without parsing a log line.
+                    println!("{node_id}");
+                    std::process::ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::ExitCode::FAILURE
+                }
+            }
+        }
+        _ => unreachable!("caller matched the subcommand"),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), sqlx::Error> {
     dotenv().ok();
+
+    // Key custody runs before anything else is set up: a restore has to work
+    // with no database reachable, which is the state an outpost is in when it
+    // most needs restoring.
+    if let Some(cmd) = std::env::args().nth(1) {
+        if cmd == "keys-seal" || cmd == "keys-unseal" {
+            std::process::exit(match run_key_subcommand(&cmd) {
+                c if c == std::process::ExitCode::SUCCESS => 0,
+                _ => 1,
+            });
+        }
+    }
+
     init_tracing();
 
     // ---- DB ----

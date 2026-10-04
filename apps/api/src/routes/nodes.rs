@@ -70,6 +70,70 @@ pub fn node_routes() -> Router<AppState> {
         .route("/:id/key-history", get(key_history))
 }
 
+/// Succession, on its own unauthenticated path.
+///
+/// Mounted outside the fabric guard, because the authority is the predecessor
+/// signature in the body rather than a credential in a header — a node whose
+/// key is being replaced may have no way to present the old one as a header
+/// while the new one is half-installed.
+///
+/// Given a distinct prefix (`/api/node-succession/:id`) rather than hidden
+/// among the admin-gated `/api/nodes` routes. An endpoint that accepts no
+/// credential should be visible as one in the route table, not something a
+/// reader has to notice.
+pub fn succession_routes() -> Router<AppState> {
+    Router::new().route("/:id", post(succeed_key))
+}
+
+/// Does this reason mean the old key is in someone else's hands?
+///
+/// Matched on substrings rather than an enum because the field is free text and
+/// already in use; the safe direction is to treat anything that *looks* like a
+/// compromise as one, since the cost of being wrong is a rotation that is
+/// slightly more disruptive rather than a stolen key that still works.
+pub fn reason_is_compromise(reason: Option<&str>) -> bool {
+    let r = reason.unwrap_or("").to_ascii_lowercase();
+    ["compromis", "leak", "stolen", "theft", "exposed", "breach"]
+        .iter()
+        .any(|needle| r.contains(needle))
+}
+
+/// How long a peer keeps accepting a superseded key.
+///
+/// This is what makes a multi-peer rotation survivable. A rotation cannot be
+/// atomic across a fabric, and the only workable order is: tell every peer
+/// first, install the new key last. During that window a peer which has already
+/// accepted the succession still sees requests signed by the old key — so it
+/// accepts the predecessor, for a bounded time, and says so in the log.
+///
+/// Twenty-four hours by default because a peer may be unreachable for most of a
+/// day, which is the normal case this whole system is built for.
+pub fn key_grace_secs() -> i64 {
+    std::env::var("KEY_ROTATION_GRACE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|v| *v >= 0)
+        .unwrap_or(24 * 3600)
+}
+
+/// Canonical bytes of a succession statement, length-prefixed per the repo
+/// convention so no two different field splits can produce the same message.
+///
+/// Signed **twice**: by the outgoing key, which is what transfers the
+/// authority, and by the incoming key, which proves somebody actually holds it.
+/// Without the second signature a typo could hand a node's identity to a key
+/// nobody has, and the node would have no way back.
+pub fn succession_message(node_id: &str, old_pub: &str, new_pub: &str, ts: i64) -> Vec<u8> {
+    let ts = ts.to_string();
+    let mut out = Vec::with_capacity(160);
+    out.extend_from_slice(b"node-succession|v1");
+    for field in [node_id, old_pub, new_pub, ts.as_str()] {
+        out.extend_from_slice(&(field.len() as u32).to_be_bytes());
+        out.extend_from_slice(field.as_bytes());
+    }
+    out
+}
+
 /// Canonical message the *new* key signs to prove the rotation is genuine.
 pub fn rotation_message(node_id: &str, new_public_key: &str, ts: i64) -> String {
     format!("rotate|{node_id}|{new_public_key}|{ts}")
@@ -157,8 +221,9 @@ pub async fn rotate_key(
 
     sqlx::query(
         r#"
-        INSERT INTO node_key_history (node_id, old_public_key, new_public_key, reason, rotated_by)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO node_key_history
+          (node_id, old_public_key, new_public_key, reason, rotated_by, method, grace)
+        VALUES ($1, $2, $3, $4, $5, 'admin', $6)
         "#,
     )
     .bind(id)
@@ -166,6 +231,9 @@ pub async fn rotate_key(
     .bind(&body.new_public_key)
     .bind(body.reason.as_deref().unwrap_or("rotated"))
     .bind(&admin.0.sub)
+    // A key rotated because it leaked must stop working now. A grace window on
+    // a stolen key is a grace window for whoever stole it.
+    .bind(!reason_is_compromise(body.reason.as_deref()))
     .execute(&mut *tx)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -598,5 +666,212 @@ pub async fn list_nodes(State(state): State<AppState>) -> Json<Vec<NodeInfo>> {
         .collect();
 
     Json(nodes)
+}
+
+#[derive(Deserialize)]
+pub struct SuccessionRequest {
+    pub new_public_key: String,
+    pub ts: i64,
+    /// Over [`succession_message`], by the **outgoing** key. This is what
+    /// transfers the authority.
+    pub predecessor_signature: String,
+    /// Over the same message, by the **incoming** key. Proof somebody holds it.
+    pub successor_signature: String,
+    pub reason: Option<String>,
+}
+
+/// POST /api/nodes/:id/succeed — rotate a node's key on the strength of its
+/// own outgoing key.
+///
+/// **No administrator.** That is the point: `rotate-key` needs an admin JWT on
+/// *this* outpost, so on a federated fabric a node could only rotate with
+/// administrative access to every other company's outpost — which it does not
+/// have, so in practice nobody rotated at all.
+///
+/// Nothing is trusted here that was not already trusted. The outgoing key was
+/// already authoritative for this node, and it is naming its own successor. An
+/// attacker able to forge the predecessor signature could already sign requests
+/// as the node.
+///
+/// Both signatures are required. Without the successor's, a typo in
+/// `new_public_key` would hand the node's identity to a key nobody holds, and
+/// it could never sign its way back.
+pub async fn succeed_key(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<Uuid>,
+    Json(body): Json<SuccessionRequest>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    use axum::http::StatusCode;
+
+    let skew = (Utc::now().timestamp() - body.ts).abs();
+    if skew > REGISTRATION_MAX_SKEW_SECS {
+        return Err((StatusCode::BAD_REQUEST, format!("stale succession timestamp ({skew}s)")));
+    }
+
+    let row: Option<(String, bool)> = sqlx::query_as(
+        "SELECT public_key, COALESCE(revoked,false) FROM node_registry WHERE node_id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let Some((old_key, revoked)) = row else {
+        return Err((StatusCode::NOT_FOUND, "node not in registry".into()));
+    };
+
+    // A revoked node cannot hand its authority on. Revocation is an operator
+    // saying "this node is not to be trusted"; letting its key nominate a
+    // successor would let it undo that itself, and make revocation decorative.
+    if revoked {
+        tracing::warn!(node_id = %id, "succession refused: node is revoked");
+        return Err((
+            StatusCode::FORBIDDEN,
+            "this node is revoked; an administrator must rotate it in".into(),
+        ));
+    }
+
+    if old_key == body.new_public_key {
+        return Err((StatusCode::BAD_REQUEST, "successor is identical to the current key".into()));
+    }
+
+    let message = succession_message(&id.to_string(), &old_key, &body.new_public_key, body.ts);
+
+    // The outgoing key authorises the change.
+    if !crate::services::identity::verify_signature(
+        &old_key,
+        &message,
+        &body.predecessor_signature,
+    ) {
+        tracing::warn!(node_id = %id, "succession refused: the current key did not sign it");
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "predecessor_signature does not verify against the key on file".into(),
+        ));
+    }
+
+    // The incoming key proves it exists.
+    if !crate::services::identity::verify_signature(
+        &body.new_public_key,
+        &message,
+        &body.successor_signature,
+    ) {
+        tracing::warn!(node_id = %id, "succession refused: the new key did not sign it");
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "successor_signature does not verify against new_public_key".into(),
+        ));
+    }
+
+    let grace = !reason_is_compromise(body.reason.as_deref());
+
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    sqlx::query(
+        "UPDATE node_registry SET public_key = $2, key_rotated_at = NOW() WHERE node_id = $1",
+    )
+    .bind(id)
+    .bind(&body.new_public_key)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO node_key_history
+          (node_id, old_public_key, new_public_key, reason, rotated_by, method, grace)
+        VALUES ($1, $2, $3, $4, 'self (succession)', 'succession', $5)
+        "#,
+    )
+    .bind(id)
+    .bind(&old_key)
+    .bind(&body.new_public_key)
+    .bind(body.reason.as_deref().unwrap_or("planned succession"))
+    .bind(grace)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    tracing::warn!(node_id = %id, grace, "node key succeeded by its predecessor");
+
+    Ok(Json(serde_json::json!({
+        "status": "succeeded",
+        "nodeId": id,
+        // Said back explicitly, because it decides whether the old key still
+        // works and the caller's rollout order depends on knowing.
+        "predecessorAcceptedForSecs": if grace { key_grace_secs() } else { 0 },
+        "note": if grace {
+            "The previous key is accepted for the grace window. Tell every peer before \
+             installing the new key locally — the reverse order strands you at peers that \
+             have not been told."
+        } else {
+            "No grace window: this was recorded as a compromise, so the previous key stops \
+             working immediately."
+        },
+    })))
+}
+
+#[cfg(test)]
+mod succession_tests {
+    use super::*;
+
+    /// Anything that reads like a compromise loses its grace window.
+    ///
+    /// Matched loosely on purpose: being wrong costs a slightly more disruptive
+    /// rotation, where the other direction leaves a stolen key working for a
+    /// day.
+    #[test]
+    fn a_compromise_reason_removes_the_grace_window() {
+        assert!(reason_is_compromise(Some("key was compromised")));
+        assert!(reason_is_compromise(Some("Laptop STOLEN")));
+        assert!(reason_is_compromise(Some("credentials leaked in a repo")));
+        assert!(reason_is_compromise(Some("suspected breach")));
+
+        assert!(!reason_is_compromise(Some("annual rotation")));
+        assert!(!reason_is_compromise(Some("planned succession")));
+        assert!(!reason_is_compromise(None));
+    }
+
+    /// Every field is under the signature, and boundaries cannot be moved.
+    ///
+    /// Without length prefixes, `old="a", new="b|c"` and `old="a|b", new="c"`
+    /// would sign identical bytes — one statement authorising two different
+    /// successors.
+    #[test]
+    fn a_succession_statement_binds_every_field() {
+        let base = succession_message("n", "old", "new", 100);
+        assert_ne!(base, succession_message("m", "old", "new", 100), "node id");
+        assert_ne!(base, succession_message("n", "other", "new", 100), "predecessor");
+        assert_ne!(base, succession_message("n", "old", "other", 100), "successor");
+        assert_ne!(base, succession_message("n", "old", "new", 101), "timestamp");
+
+        assert_ne!(
+            succession_message("n", "a", "b|c", 1),
+            succession_message("n", "a|b", "c", 1),
+            "field boundaries must not be movable"
+        );
+    }
+
+    /// Succession and the admin rotation sign different things, so a statement
+    /// for one can never be replayed as the other.
+    #[test]
+    fn succession_is_domain_separated_from_admin_rotation() {
+        let succ = succession_message("n", "old", "new", 7);
+        let admin = rotation_message("n", "new", 7).into_bytes();
+        assert_ne!(succ, admin);
+    }
+
+    #[test]
+    fn the_grace_window_is_bounded_and_non_negative() {
+        assert!(key_grace_secs() >= 0);
+    }
 }
 

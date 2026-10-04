@@ -21,4 +21,5 @@ pub mod blockchain_feeder;
 pub mod replication;
 pub mod carriers;
 pub mod carrier_tracking;
+pub mod keyvault;
 

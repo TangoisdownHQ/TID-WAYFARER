@@ -36,6 +36,7 @@ one problem.
 | [TIDasToken (TIDAT)](./Documentation/Token.md) | What the token is for, what settlement actually verifies, and the long list of token features that are design intention rather than code. |
 | [Token Build Plan](./Documentation/TokenBuildPlan.md) | How to get from there to a working rail, in order — and which "not built" items are better left unbuilt. |
 | [Offline Settlement](./Documentation/OfflineSettlement.md) | Design for closing a trade where no chain is reachable. Not yet built. |
+| [Key Custody & Backup](./Documentation/KeyCustodyAndBackup.md) | How an outpost survives losing its disk, and how it rotates a key without an administrator at every peer. Includes the recovery drill. |
 | [Contributing](./Documentation/CONTRIBUTING.md) | How to build it, what the tests expect, and the conventions the code follows. |
 
 Each of those explains the *reasoning*, not just the shape — usually including
@@ -175,6 +176,43 @@ DAO voting.
   build with no KEM key on file still receives plaintext, flagged via
   `dtn_outbox.encrypted`, so a partially-upgraded fabric keeps working.
 - End-to-end test harness: `scripts/test_commsec.sh`.
+
+### 🔑 Key Custody & Backup — surviving a lost disk
+**Status: Implemented ✅**
+
+An outpost's identity is two files on one volume, and losing them did not fail
+loudly — the next start **minted a new identity and a new node id** and carried
+on. Peers would no longer recognise it, its organisation certificate would name
+an identity it no longer had, and every DTN bundle sealed to its old ML-KEM key
+would be permanently unreadable. Not a degraded outpost; a new one wearing an
+old name.
+
+- **Sealed key bundles** — Argon2id → AES-256-GCM over both secret keys
+  together, because either alone restores something broken. The envelope leaks
+  nothing identifying, two exports differ byte-for-byte, and `Debug` on a
+  bundle redacts the secrets so a stray `{:?}` cannot be how they escape.
+- **One archive, database and keys** (`scripts/backup_outpost.sh`). It reads
+  the keys *first* and refuses to produce a half-backup, so a missing key file
+  stops it rather than leaving a directory of database-only archives that look
+  like backups and are not.
+- **A restore drill that was actually run**: keys volume and database
+  destroyed, restored from the archive, same node id, same Ed25519 key,
+  `loaded persisted ML-KEM keypair`, and a rollup reporting `complete: true`
+  with two live sources — which is the proof that `own_org()` resolved and the
+  organisation certificate still matched.
+- **Key succession** (`POST /api/node-succession/:id`) — the outgoing key signs
+  for its successor, so rotation needs **no administrator at any peer**. The
+  previous path required an admin JWT *on the peer*, which on a federated
+  fabric means administrative access to other companies' outposts; in practice
+  nobody rotated.
+- **A bounded rollover window** so a multi-peer rotation is survivable: tell
+  every peer first, install the new key last, and peers accept the predecessor
+  for 24 hours. A rotation recorded as a *compromise* gets no window at all —
+  a grace period on a stolen key is a grace period for the thief.
+- **`GET /api/ops/keys/status`** answers "could this outpost survive losing its
+  volume", in three states rather than a boolean, because a backup habit that
+  depends on a runbook nobody opens does not survive a busy month.
+  ([details and the drill](./Documentation/KeyCustodyAndBackup.md))
 
 ### 🚚 Carriers — UPS, USPS, FedEx, DHL as *legs*
 **Status: Implemented ✅**
@@ -376,7 +414,7 @@ open  localhost:3000/ui/console.html
 ## 🔬 Testing
 
 ```bash
-SQLX_OFFLINE=true cargo test --lib            # 134 unit tests, no database needed
+SQLX_OFFLINE=true cargo test --lib            # 148 unit tests, no database needed
 ./scripts/test_commsec.sh                     # PQC end-to-end
 
 # Integration suites. These need a migrated Postgres; without TEST_DATABASE_URL
@@ -389,6 +427,7 @@ SQLX_OFFLINE=true cargo test --test dtn_replay    # 11 — DTN replay protection
 SQLX_OFFLINE=true cargo test --test chat_people   # 11 — accounts and conversations
 SQLX_OFFLINE=true cargo test --test replication   #  8 — dark sites still counting
 SQLX_OFFLINE=true cargo test --test carriers      # 14 — commercial carrier legs
+SQLX_OFFLINE=true cargo test --test key_custody   # 10 — key succession and rollover
 ```
 
 Point `TEST_DATABASE_URL` at a **throwaway** database. The suites insert
@@ -447,6 +486,10 @@ Shipped:
       ([spec](./Documentation/DelayTolerantMessaging.md))
 - [x] People administration and buyer↔seller conversations anchored to a deal
       ([details](./Documentation/PeopleAndMessages.md))
+- [x] **Key custody and backup** — sealed key bundles, one archive for database
+      and keys, a restore drill that keeps the outpost's identity, and key
+      succession so rotation needs no administrator at any peer
+      ([details](./Documentation/KeyCustodyAndBackup.md))
 - [x] **Commercial carriers as legs** — structured addresses, rating, labels,
       idempotent tracking, hazmat acceptance off the catalogue, and custody
       receipts for a party that cannot sign. Works with no marketplace, which

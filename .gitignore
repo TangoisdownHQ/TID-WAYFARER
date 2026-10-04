@@ -49,3 +49,9 @@ kem_pubkey.txt
 
 # ───── Unused vendored crates (455MB, build uses crates.io sparse registry) ─────
 /vendor/
+
+# Backup archives. These carry a sealed copy of the outpost's identity — the
+# passphrase protects them, but a repository is still the wrong place for a
+# file whose whole purpose is to live somewhere else.
+backups/
+*.tar.gz.sha256
