@@ -53,6 +53,26 @@ pub async fn harness() -> Option<Harness> {
     // a peer and the DTN cases would all pass by being refused for the wrong
     // reason.
     std::env::set_var("FABRIC_AUTH", "both");
+    // Raise the rate limits for the suites that are not about rate limiting.
+    //
+    // The limiter is per process and tests in one binary share a bucket — they
+    // have no peer address, so they all land on `Subject::Unknown`. Left at the
+    // defaults, a suite that signs in a handful of times throttles itself, and
+    // the failure looks like a bug in the feature under test rather than the
+    // limiter doing its job. `ratelimit.rs` unit tests and `tests/throttle.rs`
+    // set tight limits on purpose instead.
+    std::env::set_var("RATELIMIT_AUTH_PER_MIN", "100000");
+    std::env::set_var("RATELIMIT_AUTH_BURST", "100000");
+    std::env::set_var("RATELIMIT_WRITE_PER_MIN", "100000");
+    std::env::set_var("RATELIMIT_WRITE_BURST", "100000");
+    std::env::set_var("RATELIMIT_READ_PER_MIN", "100000");
+    std::env::set_var("RATELIMIT_READ_BURST", "100000");
+    std::env::set_var("RATELIMIT_FABRIC_PER_MIN", "100000");
+    std::env::set_var("RATELIMIT_FABRIC_BURST", "100000");
+    // Likewise the persistent login throttle: a suite that deliberately fails
+    // a sign-in would otherwise lock the account out for the next test.
+    std::env::set_var("LOGIN_THROTTLE_IP_FAILURES", "100000");
+    std::env::set_var("LOGIN_THROTTLE_ACCOUNT_FAILURES", "100000");
     std::env::set_var("NODE_SHARED_SECRET", "integration-test-fabric-secret");
 
     let identity = NodeIdentity {

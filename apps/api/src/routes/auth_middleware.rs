@@ -440,3 +440,52 @@ impl axum::extract::FromRequestParts<AppState> for AdminUser {
     }
 }
 
+
+/// Refuse a request that is coming too fast.
+///
+/// Outermost layer on purpose: it runs before authentication, before the body
+/// is read, and before anything expensive. Refusing a flood *after* verifying a
+/// JWT or an Argon2 hash would still pay the cost the flood was aiming at.
+///
+/// Returns 429 with `Retry-After`, so a well-behaved client backs off by the
+/// right amount instead of guessing.
+pub async fn enforce_rate_limit(
+    peer: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    req: Request,
+    next: Next,
+) -> Result<Response, (StatusCode, [(axum::http::header::HeaderName, String); 1], String)> {
+    use crate::services::ratelimit;
+
+    let path = req.uri().path().to_string();
+
+    // Health and metrics are exempt. A liveness probe that gets rate-limited
+    // makes an orchestrator restart a perfectly healthy outpost, which turns
+    // this defence into the outage.
+    if path.ends_with("/health") || path == "/metrics" {
+        return Ok(next.run(req).await);
+    }
+
+    let class = ratelimit::classify(req.method(), &path, req.headers());
+    let subject = ratelimit::subject_for(req.headers(), peer.map(|c| c.0));
+    let decision = ratelimit::check(class, subject.clone());
+
+    if decision.allowed {
+        return Ok(next.run(req).await);
+    }
+
+    incr(&METRICS.fabric_sig_rejected);
+    tracing::warn!(
+        class = class.name(), subject = ?subject, path = %path,
+        retry_after = decision.retry_after_secs,
+        "rate limited"
+    );
+
+    Err((
+        StatusCode::TOO_MANY_REQUESTS,
+        [(axum::http::header::RETRY_AFTER, decision.retry_after_secs.to_string())],
+        format!(
+            "too many requests — try again in {}s",
+            decision.retry_after_secs
+        ),
+    ))
+}

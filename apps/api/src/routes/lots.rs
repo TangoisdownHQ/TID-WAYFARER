@@ -10,6 +10,24 @@
 //!
 //! Both are deliberately answerable without a network round-trip to anyone
 //! else: a quarantine decision on a disconnected outpost cannot wait for core.
+//!
+//! # Organisation scoping
+//!
+//! Every handler here filters on the caller's organisation, and that was added
+//! late: this module shipped with **none** of it. Several organisations can
+//! share an outpost, so the reads disclosed another company's serials,
+//! locations, usage and expiry — and the writes were worse, because
+//! `quarantine` and `update_usage` let one organisation condemn or re-clock
+//! another's stock.
+//!
+//! It survived because the boundary test suite was written before these routes
+//! existed and never covered them. A smoke test against seeded data found it in
+//! one line: a user in one organisation was shown the other's battery serials.
+//!
+//! The filter is `i.org_id IS NOT DISTINCT FROM $org`, which matches the
+//! convention in `rollup::local_items` — `IS NOT DISTINCT FROM` rather than `=`
+//! so that a caller with no organisation sees the unaffiliated rows and not
+//! every row.
 
 use axum::{
     extract::{Path, Query, State},
@@ -24,10 +42,59 @@ use serde_json::{json, Value};
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::routes::auth_middleware::AuthenticatedUser;
+use crate::routes::auth_middleware::{AuthenticatedUser, Caller};
+use crate::services::org_scope::caller_org;
 use crate::AppState;
 
 type ApiError = (StatusCode, String);
+
+/// The caller's organisation, or a refusal.
+///
+/// Fails closed through [`caller_org`]: a caller whose organisation cannot be
+/// established sees nothing rather than everything. `Option` is still the
+/// return type because an outpost with no organisations enrolled has
+/// legitimately unaffiliated stock, and `IS NOT DISTINCT FROM` matches it.
+async fn scope(state: &AppState, caller: &Caller) -> Option<Uuid> {
+    let Caller(principal) = caller;
+    caller_org(state, principal).await
+}
+
+/// Confirm a lot belongs to the caller's organisation before touching it.
+///
+/// Used by every write. Returns 404 rather than 403 for someone else's lot:
+/// confirming it exists would disclose that another organisation holds that
+/// serial, which is exactly what the scoping is for.
+async fn owned_lot(state: &AppState, org: Option<Uuid>, lot_id: Uuid) -> Result<(), ApiError> {
+    let found: Option<Uuid> = sqlx::query_scalar(
+        "SELECT l.id FROM inventory_lots l JOIN inventory i ON i.id = l.inventory_id \
+         WHERE l.id = $1 AND i.org_id IS NOT DISTINCT FROM $2",
+    )
+    .bind(lot_id)
+    .bind(org)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(server_err("lot ownership check failed"))?;
+
+    found
+        .map(|_| ())
+        .ok_or((StatusCode::NOT_FOUND, "no such lot".to_string()))
+}
+
+/// Same, for an inventory row.
+async fn owned_item(state: &AppState, org: Option<Uuid>, item_id: Uuid) -> Result<(), ApiError> {
+    let found: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM inventory WHERE id = $1 AND org_id IS NOT DISTINCT FROM $2",
+    )
+    .bind(item_id)
+    .bind(org)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(server_err("item ownership check failed"))?;
+
+    found
+        .map(|_| ())
+        .ok_or((StatusCode::NOT_FOUND, "no such resource".to_string()))
+}
 
 fn server_err(what: &'static str) -> impl Fn(sqlx::Error) -> ApiError {
     move |e| {
@@ -127,8 +194,14 @@ fn check_status(s: &str) -> Result<(), ApiError> {
 async fn list_for_item(
     State(state): State<AppState>,
     _user: AuthenticatedUser,
+    caller: Caller,
     Path(inventory_id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
+    let org = scope(&state, &caller).await;
+    // Checked first, so another organisation's item is "not found" rather than
+    // returning an empty lot list that implies it exists and is empty.
+    owned_item(&state, org, inventory_id).await?;
+
     let lots = sqlx::query_as::<_, Lot>(
         "SELECT * FROM inventory_lots WHERE inventory_id = $1 ORDER BY expires_at NULLS LAST, received_at",
     )
@@ -173,6 +246,7 @@ async fn list_for_item(
 async fn create_lot(
     State(state): State<AppState>,
     _user: AuthenticatedUser,
+    caller: Caller,
     Path(inventory_id): Path<Uuid>,
     Json(body): Json<NewLot>,
 ) -> Result<(StatusCode, Json<Lot>), ApiError> {
@@ -182,6 +256,11 @@ async fn create_lot(
             "a lot needs a lot_code or a serial — without one it is just a quantity".into(),
         ));
     }
+    // The parent item has to be ours, or this attaches a lot to another
+    // organisation's resource — and then shows up in their counts.
+    let org = scope(&state, &caller).await;
+    owned_item(&state, org, inventory_id).await?;
+
     let quantity = body.quantity.unwrap_or(1.0);
     if quantity < 0.0 {
         return Err((StatusCode::BAD_REQUEST, "quantity cannot be negative".into()));
@@ -236,10 +315,15 @@ async fn create_lot(
 async fn get_lot(
     State(state): State<AppState>,
     _user: AuthenticatedUser,
+    caller: Caller,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Lot>, ApiError> {
-    sqlx::query_as::<_, Lot>("SELECT * FROM inventory_lots WHERE id = $1")
+    sqlx::query_as::<_, Lot>(
+        "SELECT l.* FROM inventory_lots l JOIN inventory i ON i.id = l.inventory_id \
+         WHERE l.id = $1 AND i.org_id IS NOT DISTINCT FROM $2",
+    )
         .bind(id)
+        .bind(scope(&state, &caller).await)
         .fetch_optional(&state.db)
         .await
         .map_err(server_err("lot lookup failed"))?
@@ -250,12 +334,19 @@ async fn get_lot(
 async fn update_lot(
     State(state): State<AppState>,
     _user: AuthenticatedUser,
+    caller: Caller,
     Path(id): Path<Uuid>,
     Json(patch): Json<LotPatch>,
 ) -> Result<Json<Lot>, ApiError> {
     if let Some(s) = &patch.status {
         check_status(s)?;
     }
+
+    // Confirmed before the UPDATE touches anything. These are writes, which
+    // made the missing scoping worse than a disclosure: one organisation could
+    // re-status another's stock.
+    let org = scope(&state, &caller).await;
+    owned_lot(&state, org, id).await?;
 
     sqlx::query_as::<_, Lot>(
         r#"
@@ -296,12 +387,19 @@ pub struct QuarantineRequest {
 async fn quarantine(
     State(state): State<AppState>,
     AuthenticatedUser(claims): AuthenticatedUser,
+    caller: Caller,
     Path(id): Path<Uuid>,
     Json(body): Json<QuarantineRequest>,
 ) -> Result<Json<Lot>, ApiError> {
     if body.reason.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "a quarantine needs a reason".into()));
     }
+    // Confirmed before the UPDATE touches anything. Without this one
+    // organisation could condemn another's stock — these are writes, which made
+    // the missing scoping worse than a disclosure.
+    let org = scope(&state, &caller).await;
+    owned_lot(&state, org, id).await?;
+
 
     let lot = sqlx::query_as::<_, Lot>(
         r#"
@@ -344,6 +442,7 @@ pub struct TraceQuery {
 async fn trace(
     State(state): State<AppState>,
     _user: AuthenticatedUser,
+    caller: Caller,
     Query(q): Query<TraceQuery>,
 ) -> Result<Json<Value>, ApiError> {
     if q.lot_code.is_none() && q.serial.is_none() {
@@ -357,13 +456,15 @@ async fn trace(
                i.id AS inventory_id, i.name AS item_name, i.unit, i.location
         FROM inventory_lots l
         JOIN inventory i ON i.id = l.inventory_id
-        WHERE ($1::text IS NULL OR l.lot_code = $1)
+        WHERE i.org_id IS NOT DISTINCT FROM $3
+          AND ($1::text IS NULL OR l.lot_code = $1)
           AND ($2::text IS NULL OR l.serial   = $2)
         ORDER BY l.received_at DESC
         "#,
     )
     .bind(&q.lot_code)
     .bind(&q.serial)
+    .bind(scope(&state, &caller).await)
     .fetch_all(&state.db)
     .await
     .map_err(server_err("trace failed"))?;
@@ -423,6 +524,7 @@ pub struct ExpiringQuery {
 async fn expiring(
     State(state): State<AppState>,
     _user: AuthenticatedUser,
+    caller: Caller,
     Query(q): Query<ExpiringQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let days = q.days.unwrap_or(30).clamp(0, 3650);
@@ -434,13 +536,15 @@ async fn expiring(
                i.name AS item_name, i.unit, i.location
         FROM inventory_lots l
         JOIN inventory i ON i.id = l.inventory_id
-        WHERE l.expires_at IS NOT NULL
+        WHERE i.org_id IS NOT DISTINCT FROM $2
+          AND l.expires_at IS NOT NULL
           AND l.status IN ('available','reserved')
           AND l.expires_at <= $1
         ORDER BY l.expires_at
         "#,
     )
     .bind(horizon)
+    .bind(scope(&state, &caller).await)
     .fetch_all(&state.db)
     .await
     .map_err(server_err("expiry sweep failed"))?;
@@ -525,6 +629,7 @@ pub struct UsageUpdate {
 async fn update_usage(
     State(state): State<AppState>,
     _user: AuthenticatedUser,
+    caller: Caller,
     Path(id): Path<Uuid>,
     Json(b): Json<UsageUpdate>,
 ) -> Result<Json<Value>, ApiError> {
@@ -533,6 +638,11 @@ async fn update_usage(
             return Err((StatusCode::BAD_REQUEST, format!("{name} cannot be negative")));
         }
     }
+
+    // Re-clocking another organisation's unit would move its retirement date,
+    // which is a safety decision about somebody else's equipment.
+    let org = scope(&state, &caller).await;
+    owned_lot(&state, org, id).await?;
 
     let row = sqlx::query(
         r#"
@@ -580,6 +690,7 @@ pub struct LifeQuery {
 async fn life_remaining(
     State(state): State<AppState>,
     _user: AuthenticatedUser,
+    caller: Caller,
     Query(q): Query<LifeQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let at = q.at_pct.unwrap_or(0.8).clamp(0.0, 1.0);
@@ -592,12 +703,14 @@ async fn life_remaining(
                i.life_limit_cycles, i.life_limit_hours, i.life_limit_days
         FROM inventory_lots l
         JOIN inventory i ON i.id = l.inventory_id
-        WHERE l.status IN ('available','reserved')
+        WHERE i.org_id IS NOT DISTINCT FROM $1
+          AND l.status IN ('available','reserved')
           AND (i.life_limit_cycles IS NOT NULL
             OR i.life_limit_hours  IS NOT NULL
             OR i.life_limit_days   IS NOT NULL)
         "#,
     )
+    .bind(scope(&state, &caller).await)
     .fetch_all(&state.db)
     .await
     .map_err(server_err("life sweep failed"))?;

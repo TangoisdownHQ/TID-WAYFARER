@@ -96,3 +96,6 @@ jobs:
           cargo test --test replication --verbose
           cargo test --test carriers --verbose
           cargo test --test key_custody --verbose
+          # Serial: the rate limiter is process-wide, so these tests must not
+          # race each other on the env vars that configure it.
+          cargo test --test throttle --verbose -- --test-threads=1

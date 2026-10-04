@@ -336,3 +336,296 @@ fn unique_body() -> i32 {
     });
     base + NEXT.fetch_add(1, Ordering::Relaxed)
 }
+
+// ===========================================================================
+// Lots, batches and serials
+//
+// This whole module shipped with no organisation scoping at all — nine
+// handlers, none filtering. It survived because this suite was written before
+// those routes existed and never covered them; a smoke test against seeded
+// data found it in one line, by showing a user in one organisation the other's
+// battery serials.
+//
+// The writes were the worse half: `quarantine` and `usage` let one
+// organisation condemn or re-clock another's stock, which is a safety decision
+// about somebody else's equipment.
+// ===========================================================================
+
+/// A serialised unit with a life limit, owned by one organisation.
+///
+/// `serial` is a prefix: a random suffix is appended because serials are
+/// globally unique and this suite shares one database across repeated runs.
+/// Fixed fixture serials collided on the second run — the same trap the
+/// `unique_body` helper exists for. The full serial is returned so assertions
+/// match on what was actually written.
+async fn limited_unit(
+    h: &common::Harness,
+    org: uuid::Uuid,
+    owner: uuid::Uuid,
+    name: &str,
+    serial_prefix: &str,
+    lot_code: &str,
+    cycles_used: f64,
+) -> (uuid::Uuid, uuid::Uuid, String) {
+    let serial = format!("{serial_prefix}-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    let item: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO inventory (id, owner_id, org_id, name, quantity, location, category, unit, \
+                                threshold, serialised, life_limit_cycles) \
+         VALUES (gen_random_uuid(), $1, $2, $3, 1, 'bay', 'battery', 'each', 1, true, 3000) \
+         RETURNING id",
+    )
+    .bind(owner)
+    .bind(org)
+    .bind(name)
+    .fetch_one(&h.db)
+    .await
+    .expect("could not create item");
+
+    let lot: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO inventory_lots (inventory_id, lot_code, serial, quantity, status, \
+                                     cycles_used, expires_at) \
+         VALUES ($1, $2, $3, 1, 'available', $4, NOW() + INTERVAL '5 days') \
+         RETURNING id",
+    )
+    .bind(item)
+    .bind(lot_code)
+    .bind(&serial)
+    .bind(cycles_used)
+    .fetch_one(&h.db)
+    .await
+    .expect("could not create lot");
+
+    (item, lot, serial)
+}
+
+/// A lot code unique to this test run, but shared between the two fixtures in
+/// one test — so a trace against it is the realistic guess an attacker makes.
+fn shared_lot_code() -> String {
+    format!("BATCH-{}", &uuid::Uuid::new_v4().simple().to_string()[..8])
+}
+
+/// The life-limit sweep does not show another organisation's units.
+///
+/// This is the exact leak the smoke test caught: serials, locations and usage
+/// of somebody else's serialised stock.
+#[tokio::test]
+async fn the_life_sweep_does_not_cross_an_org_boundary() {
+    let h = require_db!();
+    let mine = h.org("life-ours").await;
+    let theirs = h.org("life-theirs").await;
+    let (me, my_token) = h.user("user").await;
+    let (them, their_token) = h.user("user").await;
+    h.join(mine, me, "operator").await;
+    h.join(theirs, them, "operator").await;
+
+    let code = shared_lot_code();
+    let (_item, _lot, ours) = limited_unit(&h, mine, me, "Our pack", "SN-OURS", &code, 2950.0).await;
+    let (_, _, theirs_serial) =
+        limited_unit(&h, theirs, them, "Their pack", "SN-THEIRS", &code, 2990.0).await;
+
+    let (status, mine_view) = h.get("/api/lots/life?at_pct=0.5", &my_token).await;
+    assert_eq!(status, StatusCode::OK, "{mine_view:?}");
+    let serials: Vec<String> = mine_view["units"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|u| u["serial"].as_str().map(String::from))
+        .collect();
+    assert!(serials.contains(&ours), "our own unit is missing: {serials:?}");
+    assert!(
+        !serials.contains(&theirs_serial),
+        "another organisation's serial leaked: {serials:?}"
+    );
+
+    // And symmetrically.
+    let (_, their_view) = h.get("/api/lots/life?at_pct=0.5", &their_token).await;
+    let theirs_serials: Vec<String> = their_view["units"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|u| u["serial"].as_str().map(String::from))
+        .collect();
+    assert!(!theirs_serials.contains(&ours), "{theirs_serials:?}");
+}
+
+/// The expiry sweep is scoped too.
+#[tokio::test]
+async fn the_expiry_sweep_does_not_cross_an_org_boundary() {
+    let h = require_db!();
+    let mine = h.org("exp-ours").await;
+    let theirs = h.org("exp-theirs").await;
+    let (me, my_token) = h.user("user").await;
+    let (them, _) = h.user("user").await;
+    h.join(mine, me, "operator").await;
+    h.join(theirs, them, "operator").await;
+
+    let code = shared_lot_code();
+    let (_, _, ours) = limited_unit(&h, mine, me, "Our coolant", "SN-EXP-OURS", &code, 0.0).await;
+    let (_, _, theirs_serial) =
+        limited_unit(&h, theirs, them, "Their coolant", "SN-EXP-THEIRS", &code, 0.0).await;
+
+    let (_, view) = h.get("/api/lots/expiring?days=30", &my_token).await;
+    let body = serde_json::to_string(&view).unwrap();
+    assert!(body.contains(&ours), "our own lapsing lot is missing");
+    assert!(!body.contains(&theirs_serial), "another organisation's expiry leaked: {body}");
+}
+
+/// A recall trace cannot be used to look up somebody else's batch.
+///
+/// Worse than the sweeps, because the caller supplies the lot code: knowing or
+/// guessing a batch number would otherwise return the item, the location and
+/// the quantity still outstanding.
+#[tokio::test]
+async fn a_trace_cannot_read_another_orgs_batch() {
+    let h = require_db!();
+    let mine = h.org("trace-ours").await;
+    let theirs = h.org("trace-theirs").await;
+    let (me, my_token) = h.user("user").await;
+    let (them, _) = h.user("user").await;
+    h.join(mine, me, "operator").await;
+    h.join(theirs, them, "operator").await;
+
+    let code = shared_lot_code();
+    let (_, _, theirs_serial) =
+        limited_unit(&h, theirs, them, "Their pack", "SN-TRACE-THEIRS", &code, 10.0).await;
+
+    // Tracing the batch code directly, which is exactly the guess an attacker
+    // makes: a lot code is printed on a label and is not a secret.
+    let (status, view) = h.get(&format!("/api/lots/trace?lot_code={code}"), &my_token).await;
+    assert_eq!(status, StatusCode::OK, "{view:?}");
+    let body = serde_json::to_string(&view).unwrap();
+    assert!(
+        !body.contains(&theirs_serial),
+        "a trace returned another organisation's batch: {body}"
+    );
+}
+
+/// One organisation cannot quarantine another's stock.
+///
+/// The write half, and the serious half: quarantining somebody else's lot pulls
+/// it out of their usable stock, which is a decision about their operation.
+#[tokio::test]
+async fn one_org_cannot_quarantine_anothers_lot() {
+    let h = require_db!();
+    let mine = h.org("q-ours").await;
+    let theirs = h.org("q-theirs").await;
+    let (me, my_token) = h.user("user").await;
+    let (them, _) = h.user("user").await;
+    h.join(mine, me, "operator").await;
+    h.join(theirs, them, "operator").await;
+
+    let (_item, their_lot, _) =
+        limited_unit(&h, theirs, them, "Their pack", "SN-Q-THEIRS", &shared_lot_code(), 10.0).await;
+
+    let (status, body) = h
+        .post(
+            &format!("/api/lots/{their_lot}/quarantine"),
+            &my_token,
+            serde_json::json!({ "reason": "not mine to condemn" }),
+        )
+        .await;
+    // 404, not 403: confirming it exists would disclose that another
+    // organisation holds that serial.
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+
+    let still: String = sqlx::query_scalar("SELECT status FROM inventory_lots WHERE id = $1")
+        .bind(their_lot)
+        .fetch_one(&h.db)
+        .await
+        .unwrap();
+    assert_eq!(still, "available", "another organisation's lot was quarantined");
+}
+
+/// One organisation cannot re-clock another's unit.
+///
+/// Usage decides when a part retires, so writing it moves somebody else's
+/// safety decision.
+#[tokio::test]
+async fn one_org_cannot_record_usage_on_anothers_unit() {
+    let h = require_db!();
+    let mine = h.org("u-ours").await;
+    let theirs = h.org("u-theirs").await;
+    let (me, my_token) = h.user("user").await;
+    let (them, _) = h.user("user").await;
+    h.join(mine, me, "operator").await;
+    h.join(theirs, them, "operator").await;
+
+    let (_item, their_lot, _) =
+        limited_unit(&h, theirs, them, "Their motor", "SN-U-THEIRS", &shared_lot_code(), 100.0).await;
+
+    let (status, body) = h
+        .call(
+            "PATCH",
+            &format!("/api/lots/{their_lot}/usage"),
+            Some(&my_token),
+            Some(serde_json::json!({ "cycles_used": 2999 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+
+    let cycles: rust_decimal::Decimal =
+        sqlx::query_scalar("SELECT cycles_used FROM inventory_lots WHERE id = $1")
+            .bind(their_lot)
+            .fetch_one(&h.db)
+            .await
+            .unwrap();
+    assert_eq!(cycles.to_string(), "100", "another organisation's usage was rewritten");
+}
+
+/// A lot cannot be attached to another organisation's resource.
+///
+/// It would then appear in their lot totals and their expiry sweep, as stock
+/// they never received.
+#[tokio::test]
+async fn one_org_cannot_add_a_lot_to_anothers_item() {
+    let h = require_db!();
+    let mine = h.org("c-ours").await;
+    let theirs = h.org("c-theirs").await;
+    let (me, my_token) = h.user("user").await;
+    let (them, _) = h.user("user").await;
+    h.join(mine, me, "operator").await;
+    h.join(theirs, them, "operator").await;
+
+    let (their_item, _, _) =
+        limited_unit(&h, theirs, them, "Their pack", "SN-C-THEIRS", &shared_lot_code(), 10.0).await;
+
+    let (status, body) = h
+        .post(
+            &format!("/api/inventory/{their_item}/lots"),
+            &my_token,
+            serde_json::json!({ "lot_code": "INJECTED", "quantity": 1 }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+
+    let n: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM inventory_lots WHERE inventory_id = $1 AND lot_code = 'INJECTED'",
+    )
+    .bind(their_item)
+    .fetch_one(&h.db)
+    .await
+    .unwrap();
+    assert_eq!(n, 0, "a lot was attached to another organisation's resource");
+}
+
+/// Reading one lot directly is scoped as well.
+#[tokio::test]
+async fn one_org_cannot_read_anothers_lot_by_id() {
+    let h = require_db!();
+    let mine = h.org("r-ours").await;
+    let theirs = h.org("r-theirs").await;
+    let (me, my_token) = h.user("user").await;
+    let (them, _) = h.user("user").await;
+    h.join(mine, me, "operator").await;
+    h.join(theirs, them, "operator").await;
+
+    let (their_item, their_lot, _) =
+        limited_unit(&h, theirs, them, "Their pack", "SN-R-THEIRS", &shared_lot_code(), 10.0).await;
+
+    let (status, _) = h.get(&format!("/api/lots/{their_lot}"), &my_token).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // And the per-item listing.
+    let (status, _) = h.get(&format!("/api/inventory/{their_item}/lots"), &my_token).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

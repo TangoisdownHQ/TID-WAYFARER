@@ -15,7 +15,7 @@ use crate::routes::{
     assets::asset_routes,
     assets_fleet::fleet_asset_routes,
     auth::auth_routes,
-    auth_middleware::{enforce_lockdown, require_auth},
+    auth_middleware::{enforce_lockdown, enforce_rate_limit, require_auth},
     blockchain::blockchain_routes,
     bodies::body_routes,
     capsules::capsule_routes,
@@ -135,5 +135,9 @@ pub fn test_router(state: AppState) -> Router {
         .nest("/api", api_router(state.clone()))
         .route("/api/health", get(|| async { "OK" }))
         .layer(axum::middleware::from_fn(trace_requests))
+        // Outermost: refusing a flood has to happen before authentication and
+        // before the body is read, or the request has already cost what the
+        // flood was aiming at.
+        .layer(axum::middleware::from_fn(enforce_rate_limit))
         .with_state(state)
 }

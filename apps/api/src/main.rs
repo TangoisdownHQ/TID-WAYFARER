@@ -49,6 +49,7 @@ use tid_wayfarer::services::command_engine::run_command_engine;
 use tid_wayfarer::services::dtn::run_dtn_forwarder;
 use tid_wayfarer::services::replication::run_replication_daemon;
 use tid_wayfarer::services::carrier_tracking::run_carrier_tracker;
+use tid_wayfarer::services::login_throttle::run_pruner as run_auth_attempt_pruner;
 use tid_wayfarer::services::blockchain_feeder::run_blockchain_feeder;
 use tid_wayfarer::services::settlement::run_settlement_verifier;
 
@@ -266,6 +267,9 @@ async fn main() -> Result<(), sqlx::Error> {
     // Polls commercial carriers for live parcels and closes the custody
     // chain when one is reported delivered.
     tokio::spawn(run_carrier_tracker(state.clone()));
+    // auth_attempts is append-only on one of the busiest paths; without a
+    // pruner it is the table that eventually fills the disk.
+    tokio::spawn(run_auth_attempt_pruner(state.clone()));
     tokio::spawn(run_registration(state.clone()));
     tokio::spawn(run_blockchain_feeder(state.clone()));
     tokio::spawn(run_settlement_verifier(state.clone()));
@@ -327,6 +331,15 @@ async fn main() -> Result<(), sqlx::Error> {
         // Outermost so every request — including 404s and static files — gets
         // a request_id and lands in the counters.
         .layer(axum::middleware::from_fn(trace_requests))
+        // Above the tracing layer, so a refused flood is still counted and
+        // correlated, and below nothing else — refusing has to happen before
+        // authentication and before the body is read, or the request has
+        // already cost what the flood was aiming at. /health and /metrics are
+        // exempted inside the layer, because a throttled liveness probe makes
+        // an orchestrator restart a healthy outpost.
+        .layer(axum::middleware::from_fn(
+            tid_wayfarer::routes::auth_middleware::enforce_rate_limit,
+        ))
         .layer(cors)
         .with_state(state);
         
@@ -336,7 +349,15 @@ async fn main() -> Result<(), sqlx::Error> {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!(outpost = %get_env_var("OUTPOST_NAME"), %addr, "tid-wayfarer listening");
 
-    axum::serve(tokio::net::TcpListener::bind(addr).await?, app).await.unwrap();
+    // `into_make_service_with_connect_info` is what puts the peer address in
+    // extensions. Without it the rate limiter sees no address, falls back to a
+    // single shared bucket, and one noisy client throttles everyone.
+    axum::serve(
+        tokio::net::TcpListener::bind(addr).await?,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .unwrap();
 
     Ok(())
 }

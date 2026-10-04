@@ -411,10 +411,31 @@ open  localhost:3000/ui/console.html
 
 ---
 
+## 🧪 Try it
+
+```bash
+docker compose up -d
+scripts/seed_demo.sh      # two organisations, a dark outpost, a real scenario
+scripts/smoke_test.sh     # 49 checks against the running container
+```
+
+Then sign in at <http://localhost:4000/ui/console.html> as
+`depot@demo.invalid` / `demo-outpost-password`, and again as
+`orbital@demo.invalid` to see the same outpost from the other side of an
+organisation boundary — none of the first company's stock.
+
+The seed prints what is worth looking at and why. `--reset` removes it and
+leaves the outpost working.
+
+`smoke_test.sh` runs against the shipped container over HTTP, so it catches
+what only assembly can break: a route not mounted, a page not served, a
+migration not applied, a static asset reaching for a CDN. It found a real
+cross-organisation leak the first time it ran.
+
 ## 🔬 Testing
 
 ```bash
-SQLX_OFFLINE=true cargo test --lib            # 148 unit tests, no database needed
+SQLX_OFFLINE=true cargo test --lib            # 160 unit tests, no database needed
 ./scripts/test_commsec.sh                     # PQC end-to-end
 
 # Integration suites. These need a migrated Postgres; without TEST_DATABASE_URL
@@ -422,12 +443,13 @@ SQLX_OFFLINE=true cargo test --lib            # 148 unit tests, no database need
 # database — a test that goes red for want of infrastructure trains people to
 # ignore red.
 export TEST_DATABASE_URL=postgres://postgres:…@localhost:5433/tidasone
-SQLX_OFFLINE=true cargo test --test boundaries    # 12 — organisation isolation
+SQLX_OFFLINE=true cargo test --test boundaries    # 19 — organisation isolation
 SQLX_OFFLINE=true cargo test --test dtn_replay    # 11 — DTN replay protection
 SQLX_OFFLINE=true cargo test --test chat_people   # 11 — accounts and conversations
 SQLX_OFFLINE=true cargo test --test replication   #  8 — dark sites still counting
 SQLX_OFFLINE=true cargo test --test carriers      # 14 — commercial carrier legs
 SQLX_OFFLINE=true cargo test --test key_custody   # 10 — key succession and rollover
+SQLX_OFFLINE=true cargo test --test throttle -- --test-threads=1   # 7 — rate limiting
 ```
 
 Point `TEST_DATABASE_URL` at a **throwaway** database. The suites insert

@@ -59,7 +59,14 @@ pub async fn caller_org(state: &AppState, principal: &Principal) -> Option<Uuid>
 pub async fn own_org(state: &AppState) -> Option<Uuid> {
     let node_id = Uuid::parse_str(&state.identity.node_id).ok()?;
     sqlx::query_scalar::<_, Uuid>(
-        "SELECT org_id FROM org_outposts WHERE node_id = $1 AND revoked_at IS NULL",
+        // Ordered rather than arbitrary. `idx_org_outposts_node` is unique on
+        // node_id, so today there is at most one row and the ordering changes
+        // nothing — it is here so the answer stays deterministic if that index
+        // is ever relaxed. An intermittent "which organisation is this
+        // outpost" would be miserable to debug, and the ORDER BY costs nothing
+        // against a unique index.
+        "SELECT org_id FROM org_outposts WHERE node_id = $1 AND revoked_at IS NULL \
+         ORDER BY issued_at ASC LIMIT 1",
     )
     .bind(node_id)
     .fetch_optional(&state.db)
