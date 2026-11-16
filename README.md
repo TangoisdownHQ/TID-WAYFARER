@@ -564,7 +564,9 @@ Shipped:
       entirely is reported as a floor. `?fresh_only=true` gives the strict
       live-only figure for anything that commits.
 
-Next — the logistics vision, in dependency order:
+Next — the logistics vision, in rough dependency order. Everything below is
+**direction, not a commitment** — speculative until it ships, and subject to
+change.
 
 - [ ] **Automatic replenishment** — low stock is *detected* per-outpost
       (`GET /api/inventory/low-stock`, and the rollup flags it fabric-wide) but
@@ -604,6 +606,40 @@ Next — the logistics vision, in dependency order:
 - [ ] Rules engine v2: compound conditions (AND/OR), rate-of-change triggers
 - [ ] SupplyLink escrow contracts + IPFS inventory proofs
 - [ ] AstroNet event ledger + DAO voting
+- [ ] **SQLite edge binary** — an optional SQLite backend so an outpost can run
+      on low-power edge hardware (a Raspberry Pi, a ruggedised gateway) without a
+      full PostgreSQL instance — for field sensors, drones and small vessels.
+
+Further out — field, edge and emergency capabilities (speculative, in design):
+
+- [ ] **Radio transports — LoRa / Meshtastic & serial.** When every IP and
+      satellite link is gone, carry DTN bundles over a long-range mesh radio or a
+      serial link. A bundle is far larger than a ~200-byte LoRa frame, so it would
+      be fragmented into sequenced frames and reassembled on the far side,
+      tolerating loss and reordering; the pluggable transport seam
+      (`services::transport`) already anticipates these bearers, and because the
+      DTN envelope is signed end-to-end the radio only ever moves bytes. Needs the
+      radio hardware.
+- [ ] **QR / barcode field scanner** — a phone/tablet web app that scans a
+      package and records a stock movement or signs a custody handoff in the
+      field, working offline and syncing when a link returns, for operators who
+      have no terminal.
+- [ ] **Cold-chain & sensor-triggered holds** — tie the existing telemetry to the
+      goods: a temperature or humidity breach automatically places a compliance
+      hold that blocks shipment or settlement until it is reviewed.
+- [ ] **Damage evidence** — a recipient captures a signed, hash-locked damage
+      report on arrival that travels as tamper-evident evidence and suspends
+      settlement until the dispute is resolved.
+- [ ] **Equipment & capacity rental** — rent generators, tools or capsule space
+      by hours or cycles of use, metered against the existing life-limit model.
+- [ ] **Emergency / SOS priority** — an urgent flag that jumps the DTN queue and
+      signals neighbouring outposts that hold free stock.
+- [ ] **Route & corridor status** — mark transport routes open or closed on the
+      map so the order engine routes around a blocked port or a shut launch
+      window.
+
+None of the above is in this repository yet; each is a direction we expect to
+build. Tracking issues will follow as they move from design into code.
 
 ---
 
