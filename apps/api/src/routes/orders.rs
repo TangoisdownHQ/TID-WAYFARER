@@ -705,6 +705,18 @@ pub async fn mark_settled(
     if f.status != "delivered" {
         return Err(StatusCode::CONFLICT);
     }
+    // Money does not move onto contested goods: an open damage report on this
+    // fulfilment suspends settlement until it is resolved or withdrawn.
+    if crate::routes::damage::fulfillment_has_open_damage(&state.db, id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "damage suspension check failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+    {
+        tracing::warn!(fulfillment_id = %id, "settlement refused: an open damage report suspends it");
+        return Err(StatusCode::CONFLICT);
+    }
     // Which rail this settlement is on. An explicit unknown name is refused
     // rather than quietly defaulted — the rail *is* the payment, not a provider
     // choice. Omitting it uses the deployment default (TIDAT unless configured

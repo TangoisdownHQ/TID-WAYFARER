@@ -288,7 +288,7 @@ fn footer_block(c: &Consignment) -> String {
 /// could fetch another organisation's packing list, commercial invoice, lot
 /// serials, suppliers and custody chain by guessing an order id: a cross-tenant
 /// disclosure of exactly the commercially sensitive data a document gathers.
-async fn require_order_party(state: &AppState, order_id: Uuid, caller: Uuid) -> Result<(), ApiError> {
+pub(crate) async fn require_order_party(state: &AppState, order_id: Uuid, caller: Uuid) -> Result<(), ApiError> {
     let row = sqlx::query(
         "SELECT o.requester_id, f.shipper_id \
          FROM orders o LEFT JOIN fulfillments f ON f.order_id = o.id \

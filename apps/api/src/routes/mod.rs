@@ -21,6 +21,7 @@ pub mod bodies;
 pub mod asset_logistics;
 pub mod orders;
 pub mod vouchers;
+pub mod damage;
 pub mod rules;
 pub mod peers;
 pub mod ops;

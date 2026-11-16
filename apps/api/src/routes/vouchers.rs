@@ -323,6 +323,17 @@ pub async fn discharge_voucher(
         return Err(StatusCode::CONFLICT);
     }
 
+    // An open damage report on the fulfilment suspends discharge, the same way
+    // it suspends on-chain settlement — a contested delivery holds the money.
+    if let Some(fid) = v.fulfillment_id {
+        if crate::routes::damage::fulfillment_has_open_damage(&state.db, fid)
+            .await
+            .map_err(ise)?
+        {
+            return Err(StatusCode::CONFLICT);
+        }
+    }
+
     // Delivery is discharged by a complete, continuous custody chain that
     // reached a final 'delivery' handoff.
     let legs_rows = sqlx::query(

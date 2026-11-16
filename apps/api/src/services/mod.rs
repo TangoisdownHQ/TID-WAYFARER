@@ -15,6 +15,7 @@ pub mod settlement;
 pub mod custody;
 pub mod voucher;
 pub mod transport;
+pub mod damage;
 pub mod forecast;
 pub mod org_trust;
 pub mod org_scope;
