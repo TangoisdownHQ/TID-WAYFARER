@@ -345,6 +345,55 @@ struct ReceiveEnvelope {
 /// never silent: an operator watching /api/dtn/rejected sees a peer that has
 /// not been upgraded, a clock that has drifted, and a replay attempt as three
 /// distinguishable things.
+/// Whether this node will carry bundles addressed to other peers (be a data
+/// mule). Off by default — relaying is a deliberate role, like the Go
+/// mesh-relay's forwarder, not something every outpost does unasked.
+fn relay_enabled() -> bool {
+    matches!(
+        std::env::var("DTN_RELAY")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "on" | "yes"
+    )
+}
+
+/// Rebuild the wire envelope from its parsed fields, for forwarding.
+///
+/// Not byte-verbatim, and it does not need to be: the author's signature covers
+/// the canonical signing bytes derived from these field *values* (see
+/// `plain_signing_bytes` / `sealed_signing_bytes`), not the JSON serialisation,
+/// so the next hop re-derives the same bytes and verifies against the author's
+/// key regardless of key order here.
+fn rebuild_envelope(
+    e: &ReceiveEnvelope,
+    msg_id: &str,
+    src: &str,
+    dest: &str,
+    sent_at: &str,
+    expires_at: &str,
+) -> Value {
+    let mut v = json!({
+        "v": ENVELOPE_VERSION,
+        "msg_id": msg_id,
+        "src_node_id": src,
+        "dest_node_id": dest,
+        "sent_at": sent_at,
+        "expires_at": expires_at,
+        "signature": e.signature,
+    });
+    if e.ciphertext.is_some() {
+        v["scheme"] = json!(e.scheme);
+        v["kem_ciphertext"] = json!(e.kem_ciphertext);
+        v["nonce"] = json!(e.nonce);
+        v["ciphertext"] = json!(e.ciphertext);
+    } else {
+        v["payload"] = e.payload.clone().unwrap_or(Value::Null);
+    }
+    v
+}
+
 async fn refuse(
     state: &AppState,
     src: Option<Uuid>,
@@ -428,36 +477,75 @@ async fn receive_message(
         .await);
     };
 
-    // The transport identity and the claimed author must agree. There is no
-    // relaying in this implementation — the forwarder posts straight to the
-    // destination — so a mismatch is a forgery attempt, not a hop. When
-    // multi-hop relaying lands this check moves to the outer hop and the
-    // envelope signature plus the dedupe below carry the inner guarantee.
-    if transport_node != src {
-        return Err(refuse(
-            &state,
-            src_opt,
-            msg_opt,
-            StatusCode::FORBIDDEN,
-            "src_mismatch",
-            format!("peer {transport_node} presented an envelope authored by {src}"),
-        )
-        .await);
+    // Transport identity vs authorship. These need not agree: a bundle may
+    // reach us from an intermediate peer relaying it (transport_node != src).
+    // Authenticity rests on the envelope signature — verified below against the
+    // *author's* registered key — and on the fabric guard that already
+    // authenticated the transport peer, not on transport_node == src, which
+    // only held while there was no relaying. The replay dedupe below bounds
+    // loops: each node claims a given (src, msg_id) at most once, so a bundle
+    // cannot circulate.
+    let relaying = transport_node != src;
+    if relaying {
+        tracing::debug!(transport = %transport_node, author = %src, "DTN bundle arrived via a relay");
     }
 
-    // --- Addressed to us ---
+    // --- Addressed to us, or to be relayed one hop closer ---
     let dest = envelope.dest_node_id.clone().unwrap_or_default();
-    if dest != state.identity.node_id {
+    let for_us = dest == state.identity.node_id;
+
+    // A bundle that is not for us is either carried toward its destination or
+    // refused. Relaying is opt-in (DTN_RELAY) — a node chooses to be a data
+    // mule — and a relay only carries a bundle whose destination it can
+    // actually reach; an unroutable one is refused rather than silently
+    // swallowed. The author's signature is still verified below before the
+    // bundle is enqueued, so a relay never carries forged traffic.
+    let relay_target: Option<(Uuid, String)> = if for_us {
+        None
+    } else if !relay_enabled() {
         return Err(refuse(
             &state,
             src_opt,
             msg_opt,
             StatusCode::CONFLICT,
             "misdirected",
-            format!("addressed to {dest:?}, this node is {}", state.identity.node_id),
+            format!(
+                "addressed to {dest:?}, this node is {} and relaying is off",
+                state.identity.node_id
+            ),
         )
         .await);
-    }
+    } else {
+        let Ok(dest_uuid) = Uuid::parse_str(&dest) else {
+            return Err(refuse(
+                &state,
+                src_opt,
+                msg_opt,
+                StatusCode::BAD_REQUEST,
+                "bad_dest",
+                format!("destination {dest:?} is not a node id"),
+            )
+            .await);
+        };
+        let api: Option<String> =
+            sqlx::query_scalar::<_, String>("SELECT api_endpoint FROM node_registry WHERE node_id = $1")
+                .bind(dest_uuid)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let Some(api) = api else {
+            return Err(refuse(
+                &state,
+                src_opt,
+                msg_opt,
+                StatusCode::CONFLICT,
+                "unroutable",
+                format!("no route to {dest} — destination is not in this node's registry"),
+            )
+            .await);
+        };
+        Some((dest_uuid, format!("{}/dtn/receive", api.trim_end_matches('/'))))
+    };
 
     // --- Clock ---
     let sent_at_s = envelope.sent_at.clone().unwrap_or_default();
@@ -630,6 +718,37 @@ async fn receive_message(
             "msgId": msg_id,
             "verified": true,
         })));
+    }
+
+    // --- Relay ---
+    // Not for us, and we have a route: carry the bundle one hop closer. It is
+    // forwarded verbatim — the end-to-end envelope, author signature included,
+    // is unchanged, so the destination authenticates the original author just
+    // as if it had arrived directly. Only the transport is re-signed, by the
+    // forwarder when it delivers (`signed_post_json`). The dtn_seen claim above
+    // already holds, so this relay will not carry the same bundle twice.
+    if let Some((dest_uuid, endpoint)) = relay_target {
+        let forwarded = rebuild_envelope(&envelope, &msg_id_s, &src_s, &dest, &sent_at_s, &expires_s);
+        sqlx::query(
+            "INSERT INTO dtn_outbox (dest_node_id, endpoint, payload, encrypted, msg_id, expires_at) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(dest_uuid)
+        .bind(&endpoint)
+        .bind(&forwarded)
+        .bind(sealed)
+        .bind(msg_id)
+        .bind(expires_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        tracing::info!(msg_id = %msg_id, to = %dest, "DTN bundle relayed one hop");
+        return Ok(Json(json!({ "status": "relayed", "msgId": msg_id, "to": dest })));
     }
 
     // --- Open ---

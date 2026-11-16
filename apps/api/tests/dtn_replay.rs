@@ -321,25 +321,40 @@ async fn a_user_token_cannot_deliver_bundles() {
     assert_eq!(status, StatusCode::FORBIDDEN, "{body:?}");
 }
 
-/// A registered peer cannot deliver an envelope authored by another peer.
+/// A peer may relay another peer's envelope, but cannot forge one.
 ///
-/// There is no relaying in this implementation — the forwarder posts straight
-/// to the destination — so the transport identity and the claimed author must
-/// agree. Otherwise one compromised outpost could replay another's traffic
-/// under its own transport credentials.
+/// With multi-hop relaying, the transport identity and the author need not
+/// agree: an intermediate peer legitimately carries a bundle another outpost
+/// authored. Authenticity therefore rests on the envelope signature, not on
+/// transport_node == src. So a courier presenting the author's *validly signed*
+/// envelope addressed to us is accepted — but an envelope that merely *claims*
+/// the author as src while being signed by someone else is refused at the
+/// signature, exactly where the old transport==author check used to stand.
 #[tokio::test]
-async fn a_peer_cannot_present_another_peers_envelope() {
+async fn a_peer_may_relay_a_valid_envelope_but_not_forge_one() {
     let h = require_db!();
     let author = Peer::register(&h).await;
     let courier = Peer::register(&h).await;
     let dest = h.node_id.clone();
 
-    let env = envelope(&author, &dest, json!({"n": 9}), 0, 3600);
-    let msg_id = env["msg_id"].as_str().unwrap().to_string();
+    // Relayed and valid: the courier carries the author's own signed envelope.
+    let good = envelope(&author, &dest, json!({"n": 9}), 0, 3600);
+    let good_id = good["msg_id"].as_str().unwrap().to_string();
+    let (status, body) = courier.deliver(&h, &good).await;
+    assert_eq!(status, StatusCode::OK, "a relayed valid envelope is accepted: {body:?}");
+    assert_eq!(body["status"], "received");
+    assert_eq!(inbox_rows(&h, &good_id).await, 1);
 
-    let (status, body) = courier.deliver(&h, &env).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body:?}");
-    assert_eq!(inbox_rows(&h, &msg_id).await, 0);
+    // Forged: claims the author as src, but is signed by the courier. The
+    // server verifies against the author's key, so the courier's signature
+    // fails — a forgery, not a hop.
+    let mut forged = envelope(&courier, &dest, json!({"n": 9}), 0, 3600);
+    forged["src_node_id"] = json!(author.node_id.to_string());
+    let forged_id = forged["msg_id"].as_str().unwrap().to_string();
+    let (fstatus, fbody) = courier.deliver(&h, &forged).await;
+    assert_eq!(fstatus, StatusCode::UNAUTHORIZED, "a forgery is refused: {fbody:?}");
+    assert!(fbody.as_str().unwrap_or_default().contains("bad_signature"), "{fbody:?}");
+    assert_eq!(inbox_rows(&h, &forged_id).await, 0);
 }
 
 /// Every refusal is visible to an operator.

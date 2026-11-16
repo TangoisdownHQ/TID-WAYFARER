@@ -7,10 +7,13 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use std::collections::HashMap;
+use rust_decimal::Decimal;
+use sqlx::PgPool;
 
 use crate::{
     AppState,
     routes::auth_middleware::{AuthenticatedUser, AdminUser},
+    routes::movements::{apply_stock_change, StockChange},
 };
 use core_db::models::inventory::Inventory;
 use core_db::logic::inventory_logic;
@@ -94,28 +97,87 @@ pub async fn get_inventory(
     }
 }
 
+/// Create an inventory item and record its opening balance as a genesis
+/// 'receipt' movement, in one transaction.
+///
+/// The row is inserted at zero and the opening applied through
+/// [`apply_stock_change`], so a single rule holds — the level only ever moves
+/// through the ledger — and `inventory.quantity` is exactly the sum of its
+/// movements, opening balance included. That exact equality is what a
+/// stock-counter CRDT folds; an opening set outside the ledger would be an
+/// unaccounted starting offset on every item.
+async fn insert_item_with_opening(
+    db: &PgPool,
+    owner: Uuid,
+    actor: Option<Uuid>,
+    it: &NewInventory,
+) -> Result<Inventory, String> {
+    if it.quantity < 0 {
+        return Err("cannot create an item with negative stock".into());
+    }
+    let mut tx = db.begin().await.map_err(|e| e.to_string())?;
+
+    // Mirror of queries::create_inventory, seeded at zero: the opening is
+    // applied below as a movement rather than set here.
+    let id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO inventory
+          (id, owner_id, name, description, quantity, location,
+           token_id, token_image_url, category, unit, threshold, created_at)
+        VALUES
+          (gen_random_uuid(), $1, $2, $3, 0, NULL,
+           $4, $5, COALESCE($6,'general'), COALESCE($7,'units'), COALESCE($8,0), NOW())
+        RETURNING id
+        "#,
+    )
+    .bind(owner)
+    .bind(&it.name)
+    .bind(it.description.as_deref())
+    .bind(it.token_id.as_deref())
+    .bind(it.token_image_url.as_deref())
+    .bind(it.category.as_deref())
+    .bind(it.unit.as_deref())
+    .bind(it.threshold)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if it.quantity > 0 {
+        apply_stock_change(
+            &mut tx,
+            id,
+            StockChange::Delta(Decimal::from(it.quantity)),
+            "receipt",
+            None,
+            None,
+            None,
+            actor,
+            Some("opening balance"),
+            None,
+        )
+        .await
+        .map_err(|(_, m)| m)?;
+    }
+
+    tx.commit().await.map_err(|e| e.to_string())?;
+
+    inventory_logic::get_inventory_by_id(db, id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "created item could not be read back".to_string())
+}
+
 /// Create a new inventory item
 pub async fn create_inventory(
     AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<AppState>,
     Json(payload): Json<NewInventory>,
 ) -> Result<Json<Inventory>, StatusCode> {
-    inventory_logic::add_inventory_item(
-        &state.db,
-        Uuid::parse_str(&user.sub).unwrap_or(Uuid::new_v4()),
-        &payload.name,
-        payload.description.as_deref(),
-        payload.quantity,
-        None, // location (optional, future expansion)
-        payload.token_id.as_deref(),
-        payload.token_image_url.as_deref(),
-        payload.category.as_deref(),
-        payload.unit.as_deref(),
-        payload.threshold,
-    )
-    .await
-    .map(Json)
-    .map_err(|_| StatusCode::BAD_REQUEST)
+    let owner = Uuid::parse_str(&user.sub).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    insert_item_with_opening(&state.db, owner, Some(owner), &payload)
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::BAD_REQUEST)
 }
 
 /// Update an existing inventory item (only if owner)
@@ -128,19 +190,44 @@ pub async fn update_inventory(
     let user_id = Uuid::parse_str(&user.sub).map_err(|_| StatusCode::UNAUTHORIZED)?;
     match inventory_logic::get_inventory_by_id(&state.db, id).await {
         Ok(Some(item)) if item.owner_id == user_id => {
-            inventory_logic::update_inventory_item(
-                &state.db,
+            let mut tx = state.db.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            // The quantity moves only through the ledger, so the edit leaves a
+            // movement behind just like a stock change does. Everything else is
+            // metadata and is written directly.
+            apply_stock_change(
+                &mut tx,
                 id,
-                &payload.name,
-                payload.description.as_deref(),
-                payload.quantity,
-                payload.category.as_deref(),
-                payload.unit.as_deref(),
-                payload.threshold,
+                StockChange::SetLevel(Decimal::from(payload.quantity)),
+                "adjustment",
+                None,
+                None,
+                None,
+                Some(user_id),
+                Some("item edit"),
+                None,
             )
             .await
-            .map(Json)
-            .map_err(|_| StatusCode::BAD_REQUEST)
+            .map_err(|(code, _)| code)?;
+            sqlx::query(
+                "UPDATE inventory SET name=$2, description=$3, \
+                 category=COALESCE($4, category), unit=COALESCE($5, unit), \
+                 threshold=COALESCE($6, threshold) WHERE id=$1",
+            )
+            .bind(id)
+            .bind(&payload.name)
+            .bind(payload.description.as_deref())
+            .bind(payload.category.as_deref())
+            .bind(payload.unit.as_deref())
+            .bind(payload.threshold)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let updated = inventory_logic::get_inventory_by_id(&state.db, id)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .ok_or(StatusCode::NOT_FOUND)?;
+            Ok(Json(updated))
         }
         Ok(Some(_)) => Err(StatusCode::FORBIDDEN),
         Ok(None) => Err(StatusCode::NOT_FOUND),
@@ -158,14 +245,30 @@ pub async fn update_inventory_quantity_handler(
     let user_id = Uuid::parse_str(&user.sub).map_err(|_| StatusCode::UNAUTHORIZED)?;
     match inventory_logic::get_inventory_by_id(&state.db, id).await {
         Ok(Some(item)) if item.owner_id == user_id => {
-            inventory_logic::update_inventory_quantity_with_rules(
-                &state.db,
+            let mut tx = state.db.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            // Setting a level is a ledger event like any other: the difference
+            // from the current level is recorded as an 'adjustment' movement, so
+            // the level never changes without an event behind it.
+            apply_stock_change(
+                &mut tx,
                 id,
-                payload.new_quantity,
+                StockChange::SetLevel(Decimal::from(payload.new_quantity)),
+                "adjustment",
+                None,
+                None,
+                None,
+                Some(user_id),
+                Some("manual quantity set"),
+                None,
             )
             .await
-            .map(Json)
-            .map_err(|_| StatusCode::BAD_REQUEST)
+            .map_err(|(code, _)| code)?;
+            tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let updated = inventory_logic::get_inventory_by_id(&state.db, id)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .ok_or(StatusCode::NOT_FOUND)?;
+            Ok(Json(updated))
         }
         Ok(Some(_)) => Err(StatusCode::FORBIDDEN),
         Ok(None) => Err(StatusCode::NOT_FOUND),
@@ -230,24 +333,10 @@ pub async fn bulk_import_inventory(
     let user_id = Uuid::parse_str(&user.sub).unwrap_or(Uuid::new_v4());
 
     for item in request.items {
-        match inventory_logic::add_inventory_item(
-            &state.db,
-            user_id,
-            &item.name,
-            item.description.as_deref(),
-            item.quantity,
-            None,
-            item.token_id.as_deref(),
-            item.token_image_url.as_deref(),
-            item.category.as_deref(),
-            item.unit.as_deref(),
-            item.threshold,
-        )
-        .await
-        {
+        match insert_item_with_opening(&state.db, user_id, Some(user_id), &item).await {
             Ok(_) => inserted += 1,
             Err(err) => {
-                errors.insert(item.name.clone(), format!("{:?}", err));
+                errors.insert(item.name.clone(), err);
             }
         }
     }

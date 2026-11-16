@@ -53,17 +53,122 @@ pub fn verify_mode() -> VerifyMode {
     }
 }
 
-/// The SPL mint that counts as payment (`TIDAT_MINT`).
+/// Which settlement rail a fulfilment was paid through.
 ///
-/// Without it, "credited 100" is meaningless: the RPC reports balances for
-/// every token the payee holds, so a transfer of 100 units of any worthless
-/// token would satisfy a 100-TIDAT expectation. An unset mint therefore makes
-/// a settlement *unverifiable*, not verified.
-pub fn expected_mint() -> Option<String> {
-    std::env::var("TIDAT_MINT")
-        .ok()
-        .map(|m| m.trim().to_string())
-        .filter(|m| !m.is_empty())
+/// A static enum, not a `dyn` trait, for the same reason `carriers::Provider`
+/// is: a small closed set of rails dispatched by `match`, where adding
+/// `async-trait` to express a few arms would be a poor trade. The always-works
+/// rail is `FiatInvoice` — it needs no chain and no network to record, which is
+/// what lets an organisation that settles by invoice use the marketplace at
+/// all. The on-chain rails are an optimisation over it, not a prerequisite.
+///
+/// TIDAT is a first-class rail here, not a special case: these rails sit
+/// *beside* it and do not replace it. The default rail stays TIDAT unless
+/// `SETTLEMENT_DEFAULT_RAIL` says otherwise, so a caller that sends only a
+/// signature settles exactly as it did before rails existed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettlementRail {
+    /// Out-of-band fiat — an invoice paid by bank transfer, or a payment driven
+    /// through an ERP. Recorded immediately and confirmed by the counterparty
+    /// (or an ERP webhook); never touches a chain.
+    FiatInvoice,
+    /// TIDasToken on Solana. The native rail. Verified on-chain against
+    /// `TIDAT_MINT`.
+    Tidat,
+    /// USDC on Solana. A regulated stablecoin, verified by exactly the same
+    /// on-chain path as TIDAT, against the mint in `USDC_MINT`.
+    Usdc,
+    // A proprietary, out-of-tree rail plugs in here behind a cargo feature,
+    // delegating verification to a private crate that is never committed to the
+    // public repository. Left as a documented extension point so adding it
+    // later touches only this enum and its `match` arms:
+    //   #[cfg(feature = "proprietary-rail")]
+    //   Proprietary(proprietary_rail::Handle),
+}
+
+impl SettlementRail {
+    /// Resolve a rail name. An unknown name returns `None` so the caller can
+    /// refuse: unlike a carrier (where an unconfigured provider sensibly falls
+    /// back to manual), the rail *is* the payment, and silently settling on the
+    /// wrong one would be a lie rather than a graceful degradation. Legacy
+    /// 'solana' resolves to TIDAT.
+    pub fn resolve(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "fiat" | "invoice" | "fiat_invoice" => Some(Self::FiatInvoice),
+            "tidat" | "solana" => Some(Self::Tidat),
+            "usdc" => Some(Self::Usdc),
+            _ => None,
+        }
+    }
+
+    /// The rail a settlement defaults to when the caller names none. TIDAT
+    /// unless the deployment overrides it, so a farm- or carrier-only
+    /// deployment can make fiat the default without changing any client.
+    pub fn default_rail() -> Self {
+        std::env::var("SETTLEMENT_DEFAULT_RAIL")
+            .ok()
+            .and_then(|n| Self::resolve(&n))
+            .unwrap_or(Self::Tidat)
+    }
+
+    /// The string stored in `fulfillments.settlement_chain`.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::FiatInvoice => "fiat",
+            Self::Tidat => "tidat",
+            Self::Usdc => "usdc",
+        }
+    }
+
+    /// Whether settlement on this rail is confirmed by asking a chain. Fiat is
+    /// confirmed by attestation instead, so the on-chain verifier skips it.
+    pub fn is_onchain(&self) -> bool {
+        matches!(self, Self::Tidat | Self::Usdc)
+    }
+
+    /// The SPL mint that counts as payment on this rail.
+    ///
+    /// Without it, "credited 100" is meaningless: the RPC reports balances for
+    /// every token the payee holds, so a transfer of 100 units of any worthless
+    /// token would satisfy a 100-unit expectation. An unset mint therefore
+    /// makes an on-chain settlement *unverifiable*, not verified. `None` for
+    /// fiat, which has no mint.
+    pub fn expected_mint(&self) -> Option<String> {
+        let var = match self {
+            Self::Tidat => "TIDAT_MINT",
+            Self::Usdc => "USDC_MINT",
+            Self::FiatInvoice => return None,
+        };
+        std::env::var(var)
+            .ok()
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty())
+    }
+
+    /// Whether `reference` is a well-formed payment reference for this rail,
+    /// checkable with no network. On-chain rails need a plausible Solana
+    /// signature; fiat needs a non-empty invoice reference an operator can look
+    /// up in their own books.
+    pub fn validate_reference(&self, reference: &str) -> bool {
+        match self {
+            Self::Tidat | Self::Usdc => is_plausible_solana_signature(reference),
+            Self::FiatInvoice => !reference.trim().is_empty(),
+        }
+    }
+}
+
+/// Resolve the settlement payee: the shipper's organisation wallet if it has
+/// one, else the shipper's own wallet, else nobody.
+///
+/// Organisation first, because the revenue is the organisation's; the user
+/// fallback keeps a sole trader — who has no organisation wallet — a valid
+/// payee. Without this, a company's payments landed in whichever employee
+/// shipped the order, and an employee who left took the payout address with
+/// them.
+pub fn resolve_payee(org_wallet: Option<String>, user_wallet: Option<String>) -> Option<String> {
+    org_wallet
+        .filter(|w| !w.trim().is_empty())
+        .or_else(|| user_wallet.filter(|w| !w.trim().is_empty()))
 }
 
 /// Offline-checkable validity of a Solana account address: base58, 32 bytes
@@ -131,10 +236,11 @@ pub async fn run_settlement_verifier(state: AppState) {
         let rows = match sqlx::query(
             r#"
             SELECT f.id, f.settlement_tx, f.settlement_amount, f.settlement_payee,
-                   f.settlement_attempts
+                   f.settlement_attempts, f.settlement_chain
             FROM fulfillments f
             WHERE f.settlement_status = 'pending'
               AND f.settlement_next_try_at <= NOW()
+              AND f.settlement_chain IN ('tidat', 'usdc', 'solana')
             ORDER BY f.settlement_next_try_at
             LIMIT 20
             "#,
@@ -161,8 +267,16 @@ pub async fn run_settlement_verifier(state: AppState) {
             let amount: Option<rust_decimal::Decimal> = r.get("settlement_amount");
             let payee: Option<String> = r.get("settlement_payee");
             let attempts: i32 = r.get("settlement_attempts");
+            let chain: String = r.get::<Option<String>, _>("settlement_chain").unwrap_or_default();
 
-            let outcome = verify_transaction(&http, &rpc_url, &tx, amount, payee.as_deref()).await;
+            // The query only returns on-chain rails, so an unrecognised value
+            // is a data error rather than a fiat row. Default to TIDAT's mint so
+            // it surfaces as unverifiable rather than silently disappearing.
+            let rail = SettlementRail::resolve(&chain).unwrap_or(SettlementRail::Tidat);
+            let mint = rail.expected_mint();
+
+            let outcome =
+                verify_transaction(&http, &rpc_url, &tx, amount, payee.as_deref(), mint).await;
             apply_outcome(&state, id, outcome, attempts).await;
         }
     }
@@ -175,6 +289,7 @@ async fn verify_transaction(
     signature: &str,
     expected_amount: Option<rust_decimal::Decimal>,
     expected_payee: Option<&str>,
+    expected_mint: Option<String>,
 ) -> Attempt {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -214,12 +329,12 @@ async fn verify_transaction(
     // without a mint any token would do. A missing expectation makes the
     // settlement unverifiable — it must not pass as verified.
     let (Some(expected), Some(payee), Some(mint)) =
-        (expected_amount, expected_payee, expected_mint())
+        (expected_amount, expected_payee, expected_mint.clone())
     else {
         return Attempt::Unverifiable(missing_expectations(
             expected_amount,
             expected_payee,
-            expected_mint().as_deref(),
+            expected_mint.as_deref(),
         ));
     };
 
@@ -249,7 +364,7 @@ fn missing_expectations(
         missing.push("payee wallet (shipper has no wallet_address on file)");
     }
     if mint.is_none() {
-        missing.push("token mint (TIDAT_MINT unset)");
+        missing.push("token mint (set TIDAT_MINT or USDC_MINT for the rail)");
     }
     format!(
         "transaction exists and succeeded, but cannot confirm payment: missing {}",
@@ -319,14 +434,19 @@ async fn apply_outcome(state: &AppState, id: Uuid, outcome: Attempt, attempts: i
         }
 
         Attempt::Rejected(reason) => {
-            // Terminal: the chain answered and the answer was wrong. Leaving
-            // the order in 'settling' with a recorded reason is deliberate —
-            // this is a dispute for a human, not something to retry.
+            // Terminal for *this* attempt, and a dispute record — but the order
+            // must not be stranded in 'settling' with no way forward. Reopen it
+            // to 'delivered' so either party can post a corrected settlement
+            // (the "that payment was wrong, here is the right one" path the
+            // design previously lacked), while the rejected tx and its reason
+            // stay recorded on the fulfilment as the audit trail.
             let _ = sqlx::query(
                 r#"
                 UPDATE fulfillments
                 SET settlement_status='rejected', settlement_error=$2,
-                    settlement_attempts=settlement_attempts+1, updated_at=NOW()
+                    settlement_attempts=settlement_attempts+1,
+                    status=CASE WHEN status='settling' THEN 'delivered' ELSE status END,
+                    updated_at=NOW()
                 WHERE id=$1
                 "#,
             )
@@ -335,7 +455,20 @@ async fn apply_outcome(state: &AppState, id: Uuid, outcome: Attempt, attempts: i
             .execute(&state.db)
             .await;
 
-            tracing::error!(fulfillment_id = %id, reason = %reason, "settlement REJECTED");
+            let _ = sqlx::query(
+                "UPDATE orders SET status='delivered', updated_at=NOW() \
+                 WHERE id=(SELECT order_id FROM fulfillments WHERE id=$1) \
+                   AND status='settling'",
+            )
+            .bind(id)
+            .execute(&state.db)
+            .await;
+
+            tracing::error!(
+                fulfillment_id = %id,
+                reason = %reason,
+                "settlement REJECTED; order reopened for a corrected settlement"
+            );
         }
 
         Attempt::Unverifiable(reason) => {
@@ -527,5 +660,92 @@ mod tests {
         // 0, O, I and l are not in the base58 alphabet.
         assert!(!is_plausible_solana_address(&"0".repeat(44)));
         assert!(!is_plausible_solana_address(&"1".repeat(60)));
+    }
+
+    // --- Settlement rails ---
+
+    #[test]
+    fn rail_names_resolve_case_insensitively_and_legacy_solana_is_tidat() {
+        assert_eq!(SettlementRail::resolve("fiat"), Some(SettlementRail::FiatInvoice));
+        assert_eq!(SettlementRail::resolve("invoice"), Some(SettlementRail::FiatInvoice));
+        assert_eq!(SettlementRail::resolve("TIDAT"), Some(SettlementRail::Tidat));
+        assert_eq!(SettlementRail::resolve(" usdc "), Some(SettlementRail::Usdc));
+        // Rows written before rails existed carry 'solana' and must keep working.
+        assert_eq!(SettlementRail::resolve("solana"), Some(SettlementRail::Tidat));
+    }
+
+    #[test]
+    fn an_unknown_rail_is_refused_not_defaulted() {
+        // Unlike a carrier, the rail *is* the payment: settling on the wrong one
+        // would be a lie, so an unknown name resolves to nothing.
+        assert_eq!(SettlementRail::resolve("dogecoin"), None);
+        assert_eq!(SettlementRail::resolve(""), None);
+    }
+
+    #[test]
+    fn only_the_chain_rails_are_on_chain() {
+        assert!(SettlementRail::Tidat.is_onchain());
+        assert!(SettlementRail::Usdc.is_onchain());
+        assert!(!SettlementRail::FiatInvoice.is_onchain());
+    }
+
+    #[test]
+    fn references_are_validated_per_rail_without_a_network() {
+        let sig = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUW";
+        // On-chain rails need a plausible Solana signature.
+        assert!(SettlementRail::Tidat.validate_reference(sig));
+        assert!(SettlementRail::Usdc.validate_reference(sig));
+        assert!(!SettlementRail::Tidat.validate_reference("abc"));
+        // Fiat needs only a non-empty invoice reference — and must NOT demand a
+        // Solana signature, which is the whole point of the rail.
+        assert!(SettlementRail::FiatInvoice.validate_reference("INV-2026-0042"));
+        assert!(!SettlementRail::FiatInvoice.validate_reference("   "));
+    }
+
+    #[test]
+    fn each_on_chain_rail_reads_its_own_mint_and_fiat_has_none() {
+        std::env::set_var("TIDAT_MINT", "TIDATmint11111111111111111111111111111111111");
+        std::env::set_var("USDC_MINT", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+        assert_eq!(
+            SettlementRail::Tidat.expected_mint().as_deref(),
+            Some("TIDATmint11111111111111111111111111111111111")
+        );
+        assert_eq!(
+            SettlementRail::Usdc.expected_mint().as_deref(),
+            Some("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
+        );
+        // Fiat never consults a mint even when the env vars are set.
+        assert_eq!(SettlementRail::FiatInvoice.expected_mint(), None);
+        std::env::remove_var("TIDAT_MINT");
+        std::env::remove_var("USDC_MINT");
+    }
+
+    #[test]
+    fn the_default_rail_is_tidat_unless_overridden() {
+        std::env::remove_var("SETTLEMENT_DEFAULT_RAIL");
+        assert_eq!(SettlementRail::default_rail(), SettlementRail::Tidat);
+        std::env::set_var("SETTLEMENT_DEFAULT_RAIL", "fiat");
+        assert_eq!(SettlementRail::default_rail(), SettlementRail::FiatInvoice);
+        // A nonsense override falls back to TIDAT rather than erroring at boot.
+        std::env::set_var("SETTLEMENT_DEFAULT_RAIL", "nonsense");
+        assert_eq!(SettlementRail::default_rail(), SettlementRail::Tidat);
+        std::env::remove_var("SETTLEMENT_DEFAULT_RAIL");
+    }
+
+    // --- Payee resolution (the org-wallet bug) ---
+
+    #[test]
+    fn payee_prefers_the_org_wallet_then_falls_back_to_the_user() {
+        let org = || Some("ORGwa11et1111111111111111111111111111111111".to_string());
+        let usr = || Some("USERwa11et111111111111111111111111111111111".to_string());
+        // Organisation wallet wins: a company's revenue is the company's.
+        assert_eq!(resolve_payee(org(), usr()).as_deref(), Some("ORGwa11et1111111111111111111111111111111111"));
+        // A sole trader with no org wallet still settles to their own wallet.
+        assert_eq!(resolve_payee(None, usr()).as_deref(), Some("USERwa11et111111111111111111111111111111111"));
+        // A blank org wallet is not a payee — fall through to the user.
+        assert_eq!(resolve_payee(Some("   ".into()), usr()).as_deref(), Some("USERwa11et111111111111111111111111111111111"));
+        // Nothing on file: nobody to pay, so the caller must refuse.
+        assert_eq!(resolve_payee(None, None), None);
+        assert_eq!(resolve_payee(Some("".into()), Some("".into())), None);
     }
 }

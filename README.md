@@ -6,7 +6,7 @@
 
 [![Rust](https://img.shields.io/badge/Rust-stable-orange?logo=rust)](https://www.rust-lang.org/)
 [![Build Status](https://img.shields.io/github/actions/workflow/status/TangoisdownHQ/TID-WAYFARER/rust.yml?branch=main)](https://github.com/TangoisdownHQ/TID-WAYFARER/actions)
-[![License](https://img.shields.io/github/license/TangoisdownHQ/TID-WAYFARER)](./LICENSE)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#-license)
 [![Contributions Welcome](https://img.shields.io/badge/contributions-welcome-brightgreen.svg)](./Documentation/CONTRIBUTING.md)
 ![CyberSpaceOps](https://img.shields.io/badge/Secured_by-Tangoisdown_Systems-1b5e20?logo=shield&logoColor=white)
 ![TangoisdownHQ](https://img.shields.io/badge/TangoisdownHQ-Cyber_Intelligence-002b36?logo=linux&logoColor=white)
@@ -542,10 +542,19 @@ Next — the logistics vision, in dependency order:
       schema carries `via_node_id` and the write path is shared so the DTN
       receive side can insert messages, but the routing is not wired: two
       people on different outposts cannot yet talk.
-- [ ] **Multi-hop DTN relaying** — the receiver requires the transport identity
-      to equal the envelope author, so a bundle cannot traverse an intermediate
-      outpost. True relaying needs a hop-by-hop layer around the end-to-end
-      envelope.
+- [x] **Multi-hop DTN relaying** — a bundle can now traverse an intermediate
+      outpost. The receiver no longer requires the transport identity to equal
+      the envelope author; authenticity rests on the end-to-end envelope
+      signature, and a peer that opts in (`DTN_RELAY`) carries bundles toward
+      destinations it can reach, with the replay dedupe bounding loops.
+      Delivery goes through a pluggable transport seam (`services::transport`)
+      so non-IP bearers slot in. **Sneakernet** is implemented: a `file://`
+      endpoint writes each bundle to a removable drive (`write_bundle`), and
+      `read_inbound` lists them for ingest on the far side — so when every link
+      is gone a bundle still moves on a USB stick carried by hand. Still
+      pending: wiring sneakernet ingest into the receive pipeline, the LoRa and
+      serial adapters (need hardware), and on-chain escrow anchoring for
+      offline vouchers.
 - [ ] **Organisation-issued user credentials (SSO)** — accounts are per-outpost
       today, so a person working across two outposts has two of them.
 - [ ] **Condition monitoring into life limits** — `cycles_used` and `hours_used`
@@ -559,7 +568,21 @@ Next — the logistics vision, in dependency order:
 
 ## 📜 License
 
-MIT or Apache-2.0 (to be decided).
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](./LICENSE-APACHE) or
+  <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](./LICENSE-MIT) or
+  <http://opensource.org/licenses/MIT>)
+
+at your option.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in the work by you, as defined in the Apache-2.0
+license, shall be dual licensed as above, without any additional terms or
+conditions.
 
 ## 🌍 Community
 

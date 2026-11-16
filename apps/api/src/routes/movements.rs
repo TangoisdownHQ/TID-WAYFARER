@@ -86,45 +86,19 @@ async fn record_movement(
     let actor = Uuid::parse_str(&claims.sub).ok();
 
     let mut tx = state.db.begin().await.map_err(server_err("could not start transaction"))?;
-
-    let current: Option<i32> = sqlx::query_scalar("SELECT quantity FROM inventory WHERE id = $1 FOR UPDATE")
-        .bind(b.inventory_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(server_err("inventory lookup failed"))?;
-
-    let Some(current) = current else {
-        return Err((StatusCode::NOT_FOUND, "no such inventory item".into()));
-    };
-
-    let new_level = Decimal::from(current) + delta;
-    if new_level < Decimal::ZERO {
-        return Err((
-            StatusCode::CONFLICT,
-            format!("that would take stock to {new_level}; there are only {current} on hand"),
-        ));
-    }
-
-    sqlx::query(
-        r#"
-        INSERT INTO inventory_movements
-          (inventory_id, lot_id, delta, reason, order_id, fulfillment_id, actor_id, note, occurred_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9, NOW()))
-        "#,
+    let (before, after) = apply_stock_change(
+        &mut tx,
+        b.inventory_id,
+        StockChange::Delta(delta),
+        &reason,
+        b.lot_id,
+        b.order_id,
+        b.fulfillment_id,
+        actor,
+        b.note.as_deref(),
+        b.occurred_at,
     )
-    .bind(b.inventory_id).bind(b.lot_id).bind(delta).bind(&reason)
-    .bind(b.order_id).bind(b.fulfillment_id).bind(actor).bind(&b.note).bind(b.occurred_at)
-    .execute(&mut *tx)
-    .await
-    .map_err(server_err("could not record the movement"))?;
-
-    sqlx::query("UPDATE inventory SET quantity = $2 WHERE id = $1")
-        .bind(b.inventory_id)
-        .bind(new_level.round().to_string().parse::<i32>().unwrap_or(current))
-        .execute(&mut *tx)
-        .await
-        .map_err(server_err("could not update the level"))?;
-
+    .await?;
     tx.commit().await.map_err(server_err("could not commit"))?;
 
     Ok((
@@ -133,10 +107,120 @@ async fn record_movement(
             "inventoryId": b.inventory_id,
             "delta": delta.to_string(),
             "reason": reason,
-            "quantityBefore": current,
-            "quantityAfter": new_level.to_string(),
+            "quantityBefore": before,
+            "quantityAfter": after,
         })),
     ))
+}
+
+/// Whether a stock change is expressed as a signed delta or an absolute target.
+pub(crate) enum StockChange {
+    /// Signed change: negative leaves, positive arrives.
+    Delta(Decimal),
+    /// Set the level to this value; the delta is computed from the current one.
+    SetLevel(Decimal),
+}
+
+/// Apply a stock change through the movement ledger — the one place
+/// `inventory.quantity` is allowed to move.
+///
+/// Every level change records a movement in the same transaction, so the level
+/// is always exactly the sum of the ledger and can be reconstructed from it.
+/// This is what the direct `UPDATE inventory SET quantity` paths broke: a level
+/// that changed with no event behind it. Routing the inventory editors through
+/// here closes that, and is the prerequisite for ever treating the ledger as a
+/// CRDT's source of truth.
+///
+/// `inventory.quantity` is a whole-unit counter. A change that would leave a
+/// fractional level is refused rather than silently rounded — rounding is
+/// exactly what used to make the level and the ledger disagree. Fractional
+/// stock is tracked at the lot level, where quantity is `NUMERIC`. A no-op
+/// (zero net delta) records nothing. Returns `(before, after)`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_stock_change(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    inventory_id: Uuid,
+    change: StockChange,
+    reason: &str,
+    lot_id: Option<Uuid>,
+    order_id: Option<Uuid>,
+    fulfillment_id: Option<Uuid>,
+    actor: Option<Uuid>,
+    note: Option<&str>,
+    occurred_at: Option<DateTime<Utc>>,
+) -> Result<(i32, i32), ApiError> {
+    use rust_decimal::prelude::ToPrimitive;
+
+    let before: Option<i32> =
+        sqlx::query_scalar("SELECT quantity FROM inventory WHERE id = $1 FOR UPDATE")
+            .bind(inventory_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(server_err("inventory lookup failed"))?;
+    let Some(before) = before else {
+        return Err((StatusCode::NOT_FOUND, "no such inventory item".into()));
+    };
+
+    let delta = match change {
+        StockChange::Delta(d) => d,
+        StockChange::SetLevel(target) => target - Decimal::from(before),
+    };
+
+    // A change that nets to nothing leaves neither a level change nor a
+    // ledger row — recording a zero movement would be noise.
+    if delta == Decimal::ZERO {
+        return Ok((before, before));
+    }
+
+    let new_level = Decimal::from(before) + delta;
+    if new_level < Decimal::ZERO {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("that would take stock to {new_level}; there are only {before} on hand"),
+        ));
+    }
+    if new_level.fract() != Decimal::ZERO {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "{new_level} is not a whole number; this item counts whole units — \
+                 track fractional stock against a lot"
+            ),
+        ));
+    }
+    let after = new_level.to_i32().ok_or((
+        StatusCode::BAD_REQUEST,
+        format!("{new_level} is out of range for this item's stock counter"),
+    ))?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO inventory_movements
+          (inventory_id, lot_id, delta, reason, order_id, fulfillment_id, actor_id, note, occurred_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9, NOW()))
+        "#,
+    )
+    .bind(inventory_id)
+    .bind(lot_id)
+    .bind(delta)
+    .bind(reason)
+    .bind(order_id)
+    .bind(fulfillment_id)
+    .bind(actor)
+    .bind(note)
+    .bind(occurred_at)
+    .execute(&mut **tx)
+    .await
+    .map_err(server_err("could not record the movement"))?;
+
+    sqlx::query("UPDATE inventory SET quantity = $2 WHERE id = $1")
+        .bind(inventory_id)
+        .bind(after)
+        .execute(&mut **tx)
+        .await
+        .map_err(server_err("could not update the level"))?;
+
+    Ok((before, after))
 }
 
 #[derive(Deserialize)]

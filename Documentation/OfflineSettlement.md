@@ -1,8 +1,20 @@
 # Offline Settlement — Design
 
-**Status:** proposed, not implemented.
+**Status:** steps 1–3 implemented (IOU mode); steps 4–6 pending (escrow, console,
+shared capsules).
 **Depends on:** the settlement verifier (implemented), node identity / Ed25519
 signing (implemented), DTN (implemented).
+
+**What is built (2026-11-15):** the CTV primitive (`services::voucher` — canonical
+`ctv|v1` encoding, sign/verify, monotonic nonces, condition evaluation; pure,
+unit-tested); the `transfer_vouchers`/`escrow_accounts` schema and
+`fulfillments.ctv_id` (migration `20261115_02`); and `routes::vouchers` —
+commit (IOU only, payer from the verified principal, payee resolved org→user,
+signed with the outpost identity), present, list, and discharge (delivery judged
+from the order's `services::custody` receipt chain). Both prerequisites below are
+already satisfied in the current codebase. Not yet built: on-chain escrow backing
+and the anchoring daemon (step 4), horizons/expiry/dispute console surfacing
+(step 5), and shared-capsule manifests (step 6).
 
 ---
 
@@ -231,28 +243,29 @@ Deliberately small, because the machinery mostly exists:
 
 ### Prerequisite
 
-Two findings from the September 2026 review block a correct implementation and
-should land first:
+Two findings from the September 2026 review blocked a correct implementation.
+**Both have since landed**, which is why step 2 could take the payer from the
+verified principal:
 
-1. **Authenticated-principal propagation.** `require_auth` verifies a node
-   signature and then discards the identity (`extensions.insert` appears
-   nowhere in the codebase), so no handler can know who called it. A voucher
-   endpoint that takes the payer from the request body instead of the verified
-   principal would let any fabric member sign trades as anyone else.
-2. **DTN replay protection.** The DTN envelope signs no timestamp or sequence
-   number, so a relay can replay a payload indefinitely. Vouchers and custody
-   receipts carry their own nonces, which covers them — but the transport gap
-   should close regardless.
+1. ✅ **Authenticated-principal propagation.** The guard now inserts a
+   `Principal` (node and/or user) into request extensions, read back via the
+   `Caller` / `AuthenticatedUser` extractors. `routes::vouchers::commit_voucher`
+   takes the payer from there, never from the body.
+2. ✅ **DTN replay protection.** Landed as migration `20261002_04_dtn_replay`
+   (`dtn_seen` keyed on `(src_node_id, msg_id)`). Vouchers also carry their own
+   monotonic nonces regardless.
 
 ---
 
 ## Build order
 
-1. `services/voucher.rs` — encoding, signing, verification, nonce rules. Pure,
-   fully testable offline.
-2. Schema + `routes/vouchers.rs` — commit and present, IOU mode only (no
-   escrow). End-to-end offline trade, settled by trust.
-3. Custody receipt chain + delivery-condition discharge over DTN.
+1. ✅ `services/voucher.rs` — encoding, signing, verification, nonce rules.
+   Pure, fully testable offline.
+2. ✅ Schema + `routes/vouchers.rs` — commit, present and list, IOU mode only
+   (no escrow). End-to-end offline trade, settled by trust.
+3. ✅ Delivery-condition discharge from the custody receipt chain
+   (`POST /vouchers/:id/discharge`, reusing `services::custody`). Receipts
+   already travel over DTN as sealed payloads; no transport work was needed.
 4. Anchor program on Solana (escrow + claim) and the anchoring daemon.
 5. Horizons, expiry, dispute surfacing in the console.
 6. Shared-capsule manifests on top of per-item receipt chains.

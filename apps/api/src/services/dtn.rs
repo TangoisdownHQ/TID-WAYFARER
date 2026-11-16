@@ -88,31 +88,23 @@ pub async fn run_dtn_forwarder(state: AppState) {
             let payload: serde_json::Value = r.get("payload");
             let attempts: i32 = r.get("attempts");
 
-            let request = crate::services::fabric_auth::signed_post_json(
-                &http,
-                &state.identity,
-                &endpoint,
-                &payload,
-                &node_token,
-            );
-            // The receiver distinguishes a first acceptance from a repeat, and
-            // both are successes: a retransmit happens whenever our
-            // acknowledgement was lost rather than the bundle, which on a
-            // link that comes and goes is routine. Reading the outcome back
-            // means the log says which one it was instead of implying every
-            // delivery was new.
-            let (ok, outcome) = match request.send().await {
-                Ok(resp) => {
-                    let success = resp.status().is_success();
-                    let label = resp
-                        .json::<serde_json::Value>()
+            // Delivery goes through the transport seam, which dispatches on the
+            // endpoint's scheme. Today every endpoint is an HTTP(S) peer and the
+            // HTTPS adapter signs the request exactly as before; the indirection
+            // is what lets a LoRa/serial/sneakernet bearer slot in later without
+            // touching this loop. The receiver distinguishes a first acceptance
+            // from a repeat and both are successes, so reading the outcome back
+            // keeps the log honest about which one happened.
+            let (ok, outcome) = match crate::services::transport::Transport::resolve(&endpoint) {
+                Some(transport) => {
+                    transport
+                        .deliver(&http, &state.identity, &payload, &node_token)
                         .await
-                        .ok()
-                        .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(String::from))
-                        .unwrap_or_else(|| "accepted".into());
-                    (success, label)
                 }
-                Err(e) => (false, e.to_string()),
+                None => (
+                    false,
+                    format!("no transport adapter for endpoint '{endpoint}'"),
+                ),
             };
 
             if ok {

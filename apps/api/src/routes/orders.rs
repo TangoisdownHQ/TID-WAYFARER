@@ -148,7 +148,14 @@ pub struct OrderWithBids {
 
 #[derive(Deserialize)]
 pub struct SettleRequest {
+    /// The payment reference: a Solana transaction signature for an on-chain
+    /// rail, or an invoice / ERP reference for the fiat rail.
     pub settlement_tx: String,
+    /// Which rail this was paid through: "tidat" | "usdc" | "fiat". Omitted
+    /// uses the deployment's default rail (TIDAT unless configured otherwise),
+    /// so a client that sends only a signature settles exactly as before.
+    #[serde(default)]
+    pub rail: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -211,6 +218,7 @@ pub fn fulfillment_routes() -> Router<AppState> {
         .route("/:id/ship",     post(mark_shipped))
         .route("/:id/deliver",  post(mark_delivered))
         .route("/:id/settle",   post(mark_settled))
+        .route("/:id/settle/confirm", post(confirm_settlement))
 }
 
 /// The delivery for an order, if a bid has been accepted.
@@ -697,25 +705,50 @@ pub async fn mark_settled(
     if f.status != "delivered" {
         return Err(StatusCode::CONFLICT);
     }
+    // Which rail this settlement is on. An explicit unknown name is refused
+    // rather than quietly defaulted — the rail *is* the payment, not a provider
+    // choice. Omitting it uses the deployment default (TIDAT unless configured
+    // otherwise), so a caller that sends only a signature is unaffected.
+    let rail = match payload.rail.as_deref() {
+        Some(name) => {
+            settlement::SettlementRail::resolve(name).ok_or(StatusCode::BAD_REQUEST)?
+        }
+        None => settlement::SettlementRail::default_rail(),
+    };
+
     // Shape check first — it needs no network, so a disconnected outpost can
-    // still reject nonsense. This is what stops "abc" settling an order.
-    if !settlement::is_plausible_solana_signature(&payload.settlement_tx) {
+    // still reject nonsense. On-chain rails demand a well-formed Solana
+    // signature (this is what stops "abc" settling an order); the fiat rail
+    // demands only a non-empty invoice reference.
+    if !rail.validate_reference(&payload.settlement_tx) {
         tracing::warn!(
             fulfillment_id = %id,
-            "settlement rejected: not a well-formed transaction signature"
+            rail = rail.name(),
+            "settlement rejected: reference is not valid for this rail"
         );
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // What the chain will be checked against: the accepted bid's price, paid
-    // to the shipper's wallet.
+    // What a payment is checked against: the accepted bid's price, paid to the
+    // shipper's *organisation* wallet if it has one, else the shipper's own
+    // wallet. Resolving the org wallet here is the fix for a company's revenue
+    // landing in whichever employee happened to ship the order — and an
+    // employee who leaves taking the payout address with them. The earliest
+    // org a shipper joined is chosen, matching how `org_scope` resolves a
+    // caller's org, so the answer is stable.
     let expectation = sqlx::query(
         r#"
-        SELECT b.price, u.wallet_address
+        SELECT b.price,
+               u.wallet_address AS user_wallet,
+               o.wallet_address AS org_wallet
         FROM fulfillments f
-        JOIN bids b  ON b.id = f.bid_id
+        JOIN bids  b ON b.id = f.bid_id
         JOIN users u ON u.id = f.shipper_id
+        LEFT JOIN org_members  m ON m.user_id = f.shipper_id
+        LEFT JOIN organisations o ON o.id = m.org_id
         WHERE f.id = $1
+        ORDER BY m.added_at ASC NULLS LAST
+        LIMIT 1
         "#,
     )
     .bind(id)
@@ -727,24 +760,32 @@ pub async fn mark_settled(
         })?;
 
     let (amount, payee): (Option<rust_decimal::Decimal>, Option<String>) = match expectation {
-        Some(row) => (row.get("price"), row.get("wallet_address")),
+        Some(row) => (
+            row.get("price"),
+            settlement::resolve_payee(row.get("org_wallet"), row.get("user_wallet")),
+        ),
         None => (None, None),
     };
 
     let disabled = matches!(settlement::verify_mode(), settlement::VerifyMode::Disabled);
 
-    // Refuse a settlement that could never be confirmed. Verification needs a
-    // payee to have been paid and a price to compare against; without them the
-    // verifier can only report the transaction *exists*, which is not the same
-    // as someone having been paid. Better to refuse here — where the caller
-    // can still fix it by setting a payout wallet — than to accept the record
-    // and file it as unverifiable later.
+    // Refuse an on-chain settlement that could never be confirmed: verification
+    // needs a payee to have been paid and a price to compare against; without
+    // them the verifier can only report the transaction *exists*, which is not
+    // the same as someone having been paid. Better to refuse here — where the
+    // caller can still set a payout wallet — than to file it as unverifiable
+    // later.
     //
-    // Skipped when verification is off: that deployment has already opted out,
-    // and the record is stamped 'skipped' so it never masquerades as verified.
-    if !disabled && (payee.is_none() || amount.is_none()) {
+    // The fiat rail is exempt: it carries no on-chain wallet by design (that is
+    // exactly what lets an invoice-settling organisation take part without a
+    // token), and it is confirmed by attestation via /settle/confirm, not by a
+    // chain. On-chain refusal is also skipped when verification is off: that
+    // deployment has opted out, and the record is stamped 'skipped' so it never
+    // masquerades as verified.
+    if rail.is_onchain() && !disabled && (payee.is_none() || amount.is_none()) {
         tracing::warn!(
             fulfillment_id = %id,
+            rail = rail.name(),
             has_payee = payee.is_some(),
             has_amount = amount.is_some(),
             "settlement refused: nothing to verify the payment against"
@@ -752,16 +793,19 @@ pub async fn mark_settled(
         return Err(StatusCode::PRECONDITION_FAILED);
     }
 
-    // Recorded, not asserted. The verifier daemon promotes this to 'settled'
-    // once the chain confirms it; until then the money has not demonstrably
-    // moved, so neither status claims it has. Under SETTLEMENT_VERIFY=off the
-    // settlement completes immediately but is stamped 'skipped', never
-    // 'verified' — the record stays honest about what was actually checked.
-    let (fulfillment_status, settlement_status) = if disabled {
-        ("settled", "skipped")
-    } else {
-        ("settling", "pending")
-    };
+    // Recorded, not asserted. An on-chain settlement is promoted to 'settled'
+    // by the verifier daemon once the chain confirms it; a fiat settlement by
+    // the counterparty (or an ERP webhook) attesting the invoice via
+    // /settle/confirm. Until then neither status claims the money has moved.
+    // Under SETTLEMENT_VERIFY=off an on-chain settlement completes immediately
+    // but is stamped 'skipped', never 'verified'; fiat ignores that flag, since
+    // the flag governs chain verification and fiat does not use a chain.
+    let (fulfillment_status, settlement_status, order_status) =
+        if rail.is_onchain() && disabled {
+            ("settled", "skipped", "settled")
+        } else {
+            ("settling", "pending", "settling")
+        };
 
     let mut tx = state.db.begin().await.map_err(|e| {
             tracing::error!(error = %e, "supplylink query failed");
@@ -771,8 +815,10 @@ pub async fn mark_settled(
         r#"
         UPDATE fulfillments
         SET status=$3, settlement_tx=$2, settlement_status=$4,
-            settlement_amount=$5, settlement_payee=$6, settlement_chain='solana',
+            settlement_amount=$5, settlement_payee=$6, settlement_chain=$7,
             settlement_attempts=0, settlement_next_try_at=NOW(),
+            settlement_error=NULL,
+            settlement_attested_by=NULL, settlement_attested_at=NULL,
             settled_at = CASE WHEN $3 = 'settled' THEN NOW() ELSE settled_at END,
             updated_at=NOW()
         WHERE id=$1
@@ -785,6 +831,7 @@ pub async fn mark_settled(
     .bind(settlement_status)
     .bind(amount)
     .bind(&payee)
+    .bind(rail.name())
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
@@ -801,7 +848,7 @@ pub async fn mark_settled(
 
     sqlx::query("UPDATE orders SET status=$2, updated_at=NOW() WHERE id=$1")
         .bind(f.order_id)
-        .bind(if disabled { "settled" } else { "settling" })
+        .bind(order_status)
         .execute(&mut *tx)
         .await
         .map_err(|e| {
@@ -814,6 +861,79 @@ pub async fn mark_settled(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    tracing::info!(fulfillment_id = %id, settlement_status, "settlement recorded");
+    tracing::info!(fulfillment_id = %id, rail = rail.name(), settlement_status, "settlement recorded");
+    Ok(Json(updated))
+}
+
+/// Confirm a fiat settlement.
+///
+/// A fiat rail has no on-chain proof; its equivalent is an *attestation* — the
+/// counterparty (or an ERP webhook acting for them) confirming the invoice was
+/// paid. This is that confirmation: it moves the fulfilment to
+/// 'settled'/'attested' and the order to 'settled'.
+///
+/// Only a fiat settlement still in 'pending' is confirmable this way. An
+/// on-chain settlement is the verifier daemon's job, so the guarded UPDATE
+/// refuses one here with a 409 — attestation must not become a backdoor around
+/// chain verification.
+pub async fn confirm_settlement(
+    AuthenticatedUser(user): AuthenticatedUser,
+    Path(id): Path<Uuid>,
+    State(state): State<AppState>,
+) -> Result<Json<Fulfillment>, StatusCode> {
+    let user_id = parse_uid(&user.sub)?;
+    let f = fetch_fulfillment(&state.db, id).await?.ok_or(StatusCode::NOT_FOUND)?;
+    let order = fetch_order(&state.db, f.order_id).await?.ok_or(StatusCode::NOT_FOUND)?;
+
+    // Either party to the trade may attest; an ERP webhook authenticates as one
+    // of them. Who confirmed is recorded on the row.
+    if order.requester_id != user_id && f.shipper_id != user_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let mut tx = state.db.begin().await.map_err(|e| {
+        tracing::error!(error = %e, "supplylink query failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // The WHERE clause is the whole guard: a fulfilment that is not a pending
+    // fiat settlement does not match, fetch_optional returns None, and the
+    // caller gets a 409. No separate pre-check, so there is no race.
+    let updated = sqlx::query_as::<_, Fulfillment>(
+        r#"
+        UPDATE fulfillments
+        SET status='settled', settlement_status='attested',
+            settlement_attested_by=$2, settlement_attested_at=NOW(),
+            settled_at=COALESCE(settled_at, NOW()), settlement_error=NULL,
+            updated_at=NOW()
+        WHERE id=$1 AND settlement_status='pending' AND settlement_chain='fiat'
+        RETURNING *
+        "#,
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "could not confirm settlement");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    .ok_or(StatusCode::CONFLICT)?;
+
+    sqlx::query("UPDATE orders SET status='settled', updated_at=NOW() WHERE id=$1")
+        .bind(f.order_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "supplylink query failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    tx.commit().await.map_err(|e| {
+        tracing::error!(error = %e, "supplylink query failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    tracing::info!(fulfillment_id = %id, attested_by = %user_id, "fiat settlement attested");
     Ok(Json(updated))
 }

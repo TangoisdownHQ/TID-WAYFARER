@@ -44,6 +44,7 @@ use crate::routes::{
     nodes_sync::node_sync_routes,
     ops::ops_routes,
     orders::{fulfillment_routes, order_routes},
+    vouchers::voucher_routes,
     orgs::org_routes,
     packages::package_routes,
     peers::peer_routes,
@@ -85,6 +86,7 @@ pub fn api_router(state: AppState) -> Router<AppState> {
         .nest("/kits", kit_routes())
         .nest("/orders", order_routes())
         .nest("/fulfillments", fulfillment_routes())
+        .nest("/vouchers", voucher_routes())
         .nest("/supplylink", supplylink_routes())
         .nest("/rollup", rollup_routes())
         .nest("/lots", lot_routes())

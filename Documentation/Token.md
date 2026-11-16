@@ -28,6 +28,33 @@ signature; the system then confirms on-chain that the named payee received at
 least the expected amount of a specific token, and only then does an order
 reach `settled`.
 
+## Settlement rails
+
+TIDAT is the native rail, and it is no longer the *only* one. A settlement
+names a rail, stored in `fulfillments.settlement_chain`:
+
+- **tidat** — TIDasToken on Solana. The default, and the marketplace's native
+  rail. Verified on-chain against `TIDAT_MINT`.
+- **usdc** — USDC on Solana. A regulated stablecoin for organisations that
+  will not hold a project token. Exactly the same on-chain verification path,
+  against `USDC_MINT` instead — which is the whole point of the rail
+  abstraction: a second on-chain rail is a mint, not a module.
+- **fiat** — an invoice paid by bank transfer, or a payment driven through an
+  ERP. It needs no chain, no wallet and no network to record, which is what
+  lets a farm or a shipping company use the marketplace without touching a
+  token. A fiat settlement is recorded `pending` and reaches `settled` when the
+  counterparty (or an ERP webhook acting for them) attests it via
+  `POST /orders/:id/settle/confirm` — status `attested`, kept distinct from the
+  cryptographic `verified` so a reader always knows which kind of evidence
+  stands behind a settlement.
+
+These rails sit **alongside** TIDAT, not instead of it. The marketplace still
+settles in TIDAT by default (`SETTLEMENT_DEFAULT_RAIL` overrides per
+deployment); the abstraction lowers the adoption barrier without demoting the
+token. The rail is a static enum (`settlement::SettlementRail`) following the
+same no-trait-object pattern as `carriers::Provider`, with a documented
+`#[cfg(feature = "proprietary-rail")]` extension point for an out-of-tree rail.
+
 Everything in the original token design that involves the platform *holding*
 value — escrow, staking, treasury, governance weight — is not implemented and
 has no code in this repository.
@@ -72,8 +99,12 @@ missing the result is `Unverifiable`, never `Verified`:
 | Expectation | Where it comes from | Why it is not optional |
 |---|---|---|
 | **amount** | the accepted bid's price | without it there is nothing to compare |
-| **payee** | the shipper's `wallet_address` | without it there is nobody to have been paid |
-| **mint** | `TIDAT_MINT` | without it *any* token would do |
+| **payee** | the shipper's org wallet, else the shipper's `wallet_address` | without it there is nobody to have been paid |
+| **mint** | the rail's mint (`TIDAT_MINT` for tidat, `USDC_MINT` for usdc) | without it *any* token would do |
+
+These three are required only for the **on-chain rails** (tidat, usdc). The
+**fiat rail** carries no wallet and no mint — it is confirmed by the
+counterparty attesting the invoice, not by a chain (see "Settlement rails").
 
 The mint is the one people leave out, and it is the one that matters most. The
 RPC reports balance changes for every token the payee holds, so with no
@@ -231,18 +262,18 @@ whether a payment occurred.
 Smaller than the missing features above, but real, and each one would surprise
 somebody:
 
-**The payee is a person, not a company.** The settlement payee is
-`users.wallet_address` for the shipper who fulfilled the order.
-`organisations.wallet_address` is recorded and never read. For a company
-selling capacity this is the wrong shape: payouts should go to the
-organisation, with the user as the actor who shipped it. As it stands, a
-company's revenue lands in whichever employee's wallet is on their account, and
-an employee who leaves takes the payout address with them.
+**~~The payee is a person, not a company.~~ Fixed.** The settlement payee now
+resolves as `organisation wallet → shipper's user wallet → refuse`, in
+`mark_settled` where the expectation is built. A company's revenue goes to the
+organisation; a sole trader with no organisation wallet still settles to their
+own; and nobody-on-file is refused rather than silently misdirected. See
+`settlement::resolve_payee`.
 
-**A rejected settlement does not reopen the order.** `Rejected` is terminal for
-the attempt, and the fulfilment keeps the failed transaction recorded. There is
-no flow for "that payment was wrong, here is the right one" short of operator
-intervention.
+**~~A rejected settlement does not reopen the order.~~ Fixed.** When the
+verifier rejects an on-chain settlement it now reopens the order to
+`delivered`, so either party can post a corrected settlement — the "that
+payment was wrong, here is the right one" path. The rejected transaction and
+its reason stay recorded on the fulfilment as the dispute trail.
 
 **12 attempts is a fixed ceiling.** A chain unreachable for longer than the
 backoff schedule allows ends as `Unverifiable` even though the payment may be

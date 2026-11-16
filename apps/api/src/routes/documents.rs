@@ -283,14 +283,42 @@ fn footer_block(c: &Consignment) -> String {
     )
 }
 
+/// A shipping document may be pulled only by a party to the order it describes
+/// — the requester or the shipper. Without this, any authenticated account
+/// could fetch another organisation's packing list, commercial invoice, lot
+/// serials, suppliers and custody chain by guessing an order id: a cross-tenant
+/// disclosure of exactly the commercially sensitive data a document gathers.
+async fn require_order_party(state: &AppState, order_id: Uuid, caller: Uuid) -> Result<(), ApiError> {
+    let row = sqlx::query(
+        "SELECT o.requester_id, f.shipper_id \
+         FROM orders o LEFT JOIN fulfillments f ON f.order_id = o.id \
+         WHERE o.id = $1 LIMIT 1",
+    )
+    .bind(order_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(server_err("order authorization lookup failed"))?
+    .ok_or((StatusCode::NOT_FOUND, "no such order".to_string()))?;
+
+    let requester: Uuid = row.get("requester_id");
+    let shipper: Option<Uuid> = row.get("shipper_id");
+    if caller == requester || Some(caller) == shipper {
+        Ok(())
+    } else {
+        Err((StatusCode::FORBIDDEN, "not a party to this order".to_string()))
+    }
+}
+
 async fn render(
     state: &AppState,
+    caller: Uuid,
     order_id: Uuid,
     fmt: Option<String>,
     kind: &'static str,
     build_json: impl Fn(&Consignment) -> Value,
     build_text: impl Fn(&Consignment) -> String,
 ) -> Result<axum::response::Response, ApiError> {
+    require_order_party(state, order_id, caller).await?;
     let c = gather(state, order_id).await?;
 
     if fmt.as_deref() == Some("text") {
@@ -324,11 +352,13 @@ async fn render(
 /// What is in the box, lot by lot.
 async fn packing_list(
     State(state): State<AppState>,
-    _user: AuthenticatedUser,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(order_id): Path<Uuid>,
     Query(f): Query<Format>,
 ) -> Result<axum::response::Response, ApiError> {
-    render(&state, order_id, f.format, "packing-list",
+    let caller = Uuid::parse_str(&user.sub)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "bad token".to_string()))?;
+    render(&state, caller, order_id, f.format, "packing-list",
         |c| json!({
             "order": { "id": c.order_id, "description": c.description,
                        "quantity": c.quantity.to_string(), "unit": c.unit },
@@ -372,11 +402,13 @@ async fn packing_list(
 /// condition it was received at each leg.
 async fn bill_of_lading(
     State(state): State<AppState>,
-    _user: AuthenticatedUser,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(order_id): Path<Uuid>,
     Query(f): Query<Format>,
 ) -> Result<axum::response::Response, ApiError> {
-    render(&state, order_id, f.format, "bill-of-lading",
+    let caller = Uuid::parse_str(&user.sub)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "bad token".to_string()))?;
+    render(&state, caller, order_id, f.format, "bill-of-lading",
         |c| json!({
             "shipper": c.shipper, "consignee": c.requester,
             "carrier": c.capsule, "departsAt": c.departs_at,
@@ -421,11 +453,13 @@ async fn bill_of_lading(
 /// What a border is told: contents, value, origin, and the licences relied on.
 async fn customs_declaration(
     State(state): State<AppState>,
-    _user: AuthenticatedUser,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(order_id): Path<Uuid>,
     Query(f): Query<Format>,
 ) -> Result<axum::response::Response, ApiError> {
-    render(&state, order_id, f.format, "customs-declaration",
+    let caller = Uuid::parse_str(&user.sub)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "bad token".to_string()))?;
+    render(&state, caller, order_id, f.format, "customs-declaration",
         |c| json!({
             "exporter": c.shipper, "importer": c.requester,
             "destinationBodyId": c.delivery_body_id, "destination": c.delivery_address,
@@ -478,11 +512,13 @@ async fn customs_declaration(
 /// What is owed, and for what.
 async fn commercial_invoice(
     State(state): State<AppState>,
-    _user: AuthenticatedUser,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(order_id): Path<Uuid>,
     Query(f): Query<Format>,
 ) -> Result<axum::response::Response, ApiError> {
-    render(&state, order_id, f.format, "invoice",
+    let caller = Uuid::parse_str(&user.sub)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "bad token".to_string()))?;
+    render(&state, caller, order_id, f.format, "invoice",
         |c| json!({
             "from": c.shipper, "to": c.requester,
             "lineItems": [{ "description": c.description,
