@@ -30,7 +30,7 @@ use serde_json::{json, Value};
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::routes::auth_middleware::Caller;
+use crate::routes::auth_middleware::{AdminUser, Caller};
 use crate::services::dtn_crypto;
 use crate::services::identity::{sign_message, verify_signature};
 use crate::AppState;
@@ -162,6 +162,63 @@ pub fn dtn_routes() -> Router<AppState> {
         .route("/outbox", get(list_outbox))
         .route("/inbox", get(list_inbox))
         .route("/rejected", get(list_rejected))
+        .route("/sneakernet/import", post(import_sneakernet))
+}
+
+#[derive(Deserialize)]
+struct SneakernetImport {
+    /// A directory of `*.bundle.json` files written by a `file://` delivery on
+    /// another outpost and physically carried here on a drive.
+    dir: String,
+}
+
+/// Ingest bundles carried in on a removable drive (the sneakernet transport).
+///
+/// Each bundle runs through exactly the same validation as an HTTP delivery
+/// (`process_envelope` with no live transport peer — physical custody stands in
+/// for transport auth, but the envelope signature, clock and replay dedupe
+/// still decide). Re-importing the same drive is safe: the replay window
+/// absorbs anything already seen. Admin-only, since it reads a local path.
+async fn import_sneakernet(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Json(body): Json<SneakernetImport>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let bundles = crate::services::transport::read_inbound(&body.dir)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("cannot read {}: {e}", body.dir)))?;
+
+    let (mut received, mut duplicate, mut rejected) = (0u32, 0u32, 0u32);
+    let mut problems = Vec::new();
+
+    for (name, raw) in bundles {
+        let envelope: ReceiveEnvelope = match serde_json::from_value(raw) {
+            Ok(e) => e,
+            Err(e) => {
+                rejected += 1;
+                problems.push(json!({ "file": name, "error": format!("not a DTN envelope: {e}") }));
+                continue;
+            }
+        };
+        // No live peer delivered it, and a drive does not relay onward.
+        match process_envelope(state.clone(), envelope, None, false).await {
+            Ok(v) => match v.get("status").and_then(|s| s.as_str()) {
+                Some("duplicate") => duplicate += 1,
+                _ => received += 1,
+            },
+            Err((code, msg)) => {
+                rejected += 1;
+                problems.push(json!({ "file": name, "status": code.as_u16(), "error": msg }));
+            }
+        }
+    }
+
+    Ok(Json(json!({
+        "received": received,
+        "duplicate": duplicate,
+        "rejected": rejected,
+        "problems": problems,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -421,24 +478,18 @@ async fn receive_message(
     Caller(principal): Caller,
     Json(envelope): Json<ReceiveEnvelope>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let src_opt = envelope.src_node_id;
-    let msg_opt = envelope.msg_id;
-
-    // --- Who is allowed to hand us a bundle at all ---
-    //
-    // This endpoint used to sit behind the general guard, which accepts a user
-    // token: any signed-in person could POST an envelope and have it stored
-    // for consumers to read. It is a peer-to-peer endpoint, so it now requires
-    // a *named* peer — the fabric's shared secret is not enough, because every
-    // holder of it is indistinguishable and the next check needs to know whose
-    // key to verify against.
+    // The HTTP path is peer-to-peer: it requires a *named* peer (the fabric's
+    // shared secret is not enough — every holder of it is indistinguishable,
+    // and validation needs to know whose key to verify against). The peer is
+    // the transport; the envelope's own signature is what authorises the
+    // bundle, checked in `process_envelope`.
     let transport_node = match principal.node_id() {
         Some(id) => id,
         None => {
             return Err(refuse(
                 &state,
-                src_opt,
-                msg_opt,
+                envelope.src_node_id,
+                envelope.msg_id,
                 StatusCode::FORBIDDEN,
                 "not_a_peer",
                 format!("{} may not deliver DTN bundles", principal.describe()),
@@ -446,6 +497,26 @@ async fn receive_message(
             .await)
         }
     };
+    process_envelope(state, envelope, Some(transport_node), relay_enabled()).await
+}
+
+/// Validate a received envelope and either store it (addressed to us) or relay
+/// it one hop (addressed elsewhere, when `allow_relay`). Shared by the HTTP
+/// receive path and sneakernet ingest.
+///
+/// `transport_node` is the live fabric peer that delivered the bundle, or
+/// `None` when it arrived off a removable drive. In the drive case physical
+/// custody stands in for transport authentication, but the end-to-end envelope
+/// signature and the replay dedupe below still apply unchanged — carrying a
+/// bundle on a drive never makes it trusted.
+async fn process_envelope(
+    state: AppState,
+    envelope: ReceiveEnvelope,
+    transport_node: Option<Uuid>,
+    allow_relay: bool,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let src_opt = envelope.src_node_id;
+    let msg_opt = envelope.msg_id;
 
     // --- Shape ---
     if envelope.v != Some(ENVELOPE_VERSION) {
@@ -485,9 +556,9 @@ async fn receive_message(
     // only held while there was no relaying. The replay dedupe below bounds
     // loops: each node claims a given (src, msg_id) at most once, so a bundle
     // cannot circulate.
-    let relaying = transport_node != src;
+    let relaying = transport_node != Some(src);
     if relaying {
-        tracing::debug!(transport = %transport_node, author = %src, "DTN bundle arrived via a relay");
+        tracing::debug!(transport = ?transport_node, author = %src, "DTN bundle arrived via a relay or a drive");
     }
 
     // --- Addressed to us, or to be relayed one hop closer ---
@@ -502,7 +573,7 @@ async fn receive_message(
     // bundle is enqueued, so a relay never carries forged traffic.
     let relay_target: Option<(Uuid, String)> = if for_us {
         None
-    } else if !relay_enabled() {
+    } else if !allow_relay {
         return Err(refuse(
             &state,
             src_opt,

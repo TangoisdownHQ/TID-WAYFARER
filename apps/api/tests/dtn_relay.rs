@@ -182,3 +182,74 @@ async fn a_relay_carries_each_bundle_at_most_once() {
     assert_eq!(b2["status"], "duplicate");
     assert_eq!(outbox_rows(&h, &msg_id).await, 1, "a loop must not multiply the bundle");
 }
+
+// --- Sneakernet ingest: bundles carried in on a drive run the same checks ---
+
+async fn inbox_rows(h: &common::Harness, msg_id: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>("SELECT count(*) FROM dtn_inbox WHERE msg_id = $1::uuid")
+        .bind(msg_id)
+        .fetch_one(&h.db)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn sneakernet_import_ingests_a_carried_bundle_and_dedupes_a_reimport() {
+    let h = require_db!();
+    let author = Peer::register(&h).await;
+    let (_admin, admin_tok) = h.user("admin").await;
+
+    let dir = std::env::temp_dir().join(format!("tidw-import-{}", Uuid::new_v4()));
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    let dir_s = dir.to_string_lossy().into_owned();
+
+    // A bundle authored by `author`, addressed to us, written to the drive the
+    // way a file:// delivery on the far outpost would have.
+    let env = envelope(&author, &h.node_id, serde_json::json!({ "n": 1 }));
+    let msg_id = env["msg_id"].as_str().unwrap().to_string();
+    tokio::fs::write(dir.join(format!("{msg_id}.bundle.json")), serde_json::to_vec(&env).unwrap())
+        .await
+        .unwrap();
+
+    let (st, body) = h.post("/api/dtn/sneakernet/import", &admin_tok, serde_json::json!({ "dir": dir_s })).await;
+    assert_eq!(st, StatusCode::OK, "{body:?}");
+    assert_eq!(body["received"], 1);
+    assert_eq!(body["rejected"], 0);
+    assert_eq!(inbox_rows(&h, &msg_id).await, 1, "a carried bundle is validated and filed");
+
+    // Re-importing the same drive is absorbed by the replay window — the whole
+    // point of running ingest through the same pipeline as HTTP.
+    let (st2, body2) = h.post("/api/dtn/sneakernet/import", &admin_tok, serde_json::json!({ "dir": dir_s })).await;
+    assert_eq!(st2, StatusCode::OK, "{body2:?}");
+    assert_eq!(body2["duplicate"], 1);
+    assert_eq!(body2["received"], 0);
+    assert_eq!(inbox_rows(&h, &msg_id).await, 1, "no second inbox row on re-import");
+
+    tokio::fs::remove_dir_all(&dir).await.ok();
+}
+
+#[tokio::test]
+async fn sneakernet_import_refuses_a_bundle_addressed_to_another_node() {
+    let h = require_db!();
+    let author = Peer::register(&h).await;
+    let (_admin, admin_tok) = h.user("admin").await;
+
+    let dir = std::env::temp_dir().join(format!("tidw-import-{}", Uuid::new_v4()));
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    let dir_s = dir.to_string_lossy().into_owned();
+
+    // Addressed elsewhere: ingest does not relay, so it is refused, not filed.
+    let env = envelope(&author, &Uuid::new_v4().to_string(), serde_json::json!({ "n": 2 }));
+    let msg_id = env["msg_id"].as_str().unwrap().to_string();
+    tokio::fs::write(dir.join(format!("{msg_id}.bundle.json")), serde_json::to_vec(&env).unwrap())
+        .await
+        .unwrap();
+
+    let (st, body) = h.post("/api/dtn/sneakernet/import", &admin_tok, serde_json::json!({ "dir": dir_s })).await;
+    assert_eq!(st, StatusCode::OK, "{body:?}");
+    assert_eq!(body["rejected"], 1);
+    assert_eq!(body["received"], 0);
+    assert_eq!(inbox_rows(&h, &msg_id).await, 0);
+
+    tokio::fs::remove_dir_all(&dir).await.ok();
+}

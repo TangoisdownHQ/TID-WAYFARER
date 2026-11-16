@@ -25,6 +25,47 @@ places, replenishment that takes time, partners who need to see the same
 picture, and connectivity that can't be assumed. TID Wayfarer treats those as
 one problem.
 
+## ⚡ What it does
+
+**Inventory & replenishment**
+- Org-scoped stock across every site, with the level only ever moving through a
+  signed, append-only movement ledger — so the count is always reconstructable,
+  not an opaque number that changed for no recorded reason.
+- Burn-rate forecasting: days-of-cover, stockout windows, and reorder
+  recommendations that weigh consumption against resupply transit time, not a
+  flat threshold.
+- Batch/lot and serial tracking, with life-limits (cycles/hours in service).
+
+**Marketplace (SupplyLink)**
+- Post an order, take bids, accept, fulfil — in either direction (Earth↔orbit,
+  warehouse↔farm). Share capsule/container space instead of paying for a whole one.
+- Commercial carriers (UPS/USPS/FedEx/DHL via one aggregator) as first-class
+  legs, with a manual fallback that works with no link.
+
+**Settlement — pluggable rails, online or off**
+- Rails alongside each other: **TIDAT** (Solana), **USDC** (stablecoin), and
+  **fiat invoice / ERP** — on-chain-verified or counterparty-attested.
+- **Offline settlement**: Conditional Transfer Vouchers — signed, offline-
+  verifiable promises to pay that close a trade with no network and discharge
+  from the custody chain once goods are delivered.
+
+**Trust, custody & paperwork**
+- Signed per-leg custody receipts (the cryptographic record a dispute turns on).
+- Auto-generated shipping documents — packing list, bill of lading, customs
+  declaration, commercial invoice (HS/UN codes) — visible only to a party to
+  the order.
+- Two organisations share one outpost without ever seeing each other's stock.
+
+**Works when the network is gone**
+- Every outpost is a sovereign node with its own identity and database; it keeps
+  operating cut off, and never claims data is fresher than it is.
+- Delay-tolerant networking: store-and-forward, post-quantum-sealed (ML-KEM)
+  signed envelopes, replay protection, **multi-hop relaying**, and pluggable
+  transports — HTTPS today, and **sneakernet** (bundles carried on a USB drive)
+  for when every link is down.
+- Key custody & backup with a disaster-recovery drill; rate limiting and login
+  throttling; a RAM-gated stack bring-up for constrained hardware.
+
 ### 📖 Documentation
 
 | Read this | If you want to know |
@@ -35,7 +76,7 @@ one problem.
 | [People & Messages](./Documentation/PeopleAndMessages.md) | Running accounts for your staff, and why a buyer↔seller conversation is anchored to an order rather than to a contact list. |
 | [TIDasToken (TIDAT)](./Documentation/Token.md) | What the token is for, what settlement actually verifies, and the long list of token features that are design intention rather than code. |
 | [Token Build Plan](./Documentation/TokenBuildPlan.md) | How to get from there to a working rail, in order — and which "not built" items are better left unbuilt. |
-| [Offline Settlement](./Documentation/OfflineSettlement.md) | Design for closing a trade where no chain is reachable. Not yet built. |
+| [Offline Settlement](./Documentation/OfflineSettlement.md) | Closing a trade where no chain is reachable. IOU-mode vouchers are built; on-chain escrow anchoring is the remaining step. |
 | [Key Custody & Backup](./Documentation/KeyCustodyAndBackup.md) | How an outpost survives losing its disk, and how it rotates a key without an administrator at every peer. Includes the recovery drill. |
 | [Contributing](./Documentation/CONTRIBUTING.md) | How to build it, what the tests expect, and the conventions the code follows. |
 
