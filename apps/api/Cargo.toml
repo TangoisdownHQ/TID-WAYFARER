@@ -2,6 +2,7 @@
 name = "tid-wayfarer"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 # The library crate keeps an underscore name (`tid_wayfarer`) because Rust paths
 # can't contain hyphens; the binary keeps the hyphenated product name so the
